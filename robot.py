@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
 SCRIPTS = Path(sys.executable).parent  # .venv/Scripts holds the lerobot-*.exe entry points
 DATA_DIR = ROOT / "data"
+# Calibration lives in the repo (calibration/<id>.json), not in each laptop's HF cache,
+# so every laptop maps joints exactly like the one the dataset was recorded with.
+CALIB_DIR = ROOT / "calibration"
 OUTPUTS_DIR = ROOT / "outputs" / "train"
 
 DRY_RUN = False
@@ -29,8 +32,12 @@ DRY_RUN = False
 # ---------------------------------------------------------------- helpers
 
 def run(tool: str, *args: str) -> None:
-    exe = SCRIPTS / f"{tool}.exe"
-    cmd = [str(exe if exe.exists() else tool), *args]
+    if tool == "lerobot-train":
+        # Windows-safe wrapper: replaces the `checkpoints/last` symlink (needs admin) with a junction.
+        cmd = [sys.executable, str(ROOT / "train_win.py"), *args]
+    else:
+        exe = SCRIPTS / f"{tool}.exe"
+        cmd = [str(exe if exe.exists() else tool), *args]
     print(">", " ".join(cmd), flush=True)
     if DRY_RUN:
         return
@@ -58,7 +65,10 @@ def cameras_arg() -> str:
 
 def robot_args(with_cameras: bool = True) -> list[str]:
     f = CONFIG["follower"]
-    args = [f"--robot.type={f['type']}", f"--robot.port={f['port']}", f"--robot.id={f['id']}"]
+    args = [
+        f"--robot.type={f['type']}", f"--robot.port={f['port']}", f"--robot.id={f['id']}",
+        f"--robot.calibration_dir={CALIB_DIR}",
+    ]
     if with_cameras and CONFIG.get("cameras"):
         args.append(f"--robot.cameras={cameras_arg()}")
     return args
@@ -66,7 +76,10 @@ def robot_args(with_cameras: bool = True) -> list[str]:
 
 def teleop_args() -> list[str]:
     l = CONFIG["leader"]
-    return [f"--teleop.type={l['type']}", f"--teleop.port={l['port']}", f"--teleop.id={l['id']}"]
+    return [
+        f"--teleop.type={l['type']}", f"--teleop.port={l['port']}", f"--teleop.id={l['id']}",
+        f"--teleop.calibration_dir={CALIB_DIR}",
+    ]
 
 
 def dataset_root(name: str) -> Path:
@@ -175,7 +188,8 @@ def cmd_train(a):
 
     if a.resume:
         cfg = out / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
-        run("lerobot-train", f"--config_path={cfg}", "--resume=true")
+        extra = [f"--steps={a.steps}"] if a.steps else []  # --steps raises the total to train longer
+        run("lerobot-train", f"--config_path={cfg}", "--resume=true", *extra)
         return
 
     if out.exists():

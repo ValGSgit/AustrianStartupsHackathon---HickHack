@@ -40,7 +40,8 @@ Then set `[hf] user` in `config.toml`.
 ```
 
 * Arms from the organizers are pre-assembled, so **skip `setup-motors`**. It rewrites motor ids.
-* Calibration is saved per laptop under the ids `follower` / `leader`. Don't rename them afterwards.
+* Calibration is saved to `calibration/follower.json` and `calibration/leader.json` **in this repo**. Commit both after calibrating.
+  Then every laptop maps the joints exactly as they were during recording. A different calibration at rollout time makes grasps miss.
 * Windows may reorder camera indexes after a replug. Re-run `find-cameras` if the picture looks wrong.
 
 ## 3. Record demos
@@ -67,7 +68,12 @@ What makes a good dataset:
 ```powershell
 .venv\Scripts\python robot.py train                 # ACT, settings from [train] in config.toml
 .venv\Scripts\python robot.py train --resume        # continue after a crash / Ctrl-C
+.venv\Scripts\python robot.py train --resume --steps 30000   # train an existing run for longer
 ```
+
+`robot.py train` runs `train_win.py`, which wraps `lerobot-train`. Plain `lerobot-train` crashes on Windows at the
+first checkpoint (`WinError 1314`), because it creates a `checkpoints/last` symlink and that needs admin rights.
+The wrapper creates a directory junction instead. Train, save, resume and loading through `last/` have all been verified.
 
 Checkpoints are saved to `outputs/train/<policy>/checkpoints/`, one every 5k steps. You can roll out an intermediate one while training continues.
 Watch the log line `updt_s:… mem_gb:…`. If `updt_s` is well above ~0.6 s, GPU memory is spilling into system RAM.
@@ -94,13 +100,16 @@ Measured on 2026-10-14 on a GTX 1650 (4 GB), training ACT on `lerobot/svla_so101
 | 8 | on  | 4.9  | 3.55 GB | spills to system RAM |
 | 8 | off | 5.6  | 3.73 GB | spills to system RAM |
 | 4 | on  | 2.2  | 2.14 GB | fp16 is slow on GTX 16xx |
-| **4** | **off** | **0.51** | 2.17 GB | **default in config.toml** |
+| **4** | **off** | **0.51** | 2.17 GB | use this with 2 cameras |
 | 2 | off | 0.27 | 1.40 GB | |
+| **8** (1 cam) | off | **0.48** | 1.99 GB | **default in config.toml (1 camera)** |
+| 16 (1 cam) | off | 6.4 | 3.41 GB | spills |
 
 Takeaways:
 * **Keep AMP off on this GPU.** The GTX 16xx cards have no tensor cores, and fp16 convolutions run about 5x slower than fp32.
 * **Stay under ~3.3 GB.** The 1650 also drives the display. When it runs out of VRAM, Windows silently spills into system RAM and each step gets about 10x slower instead of failing.
   To make it fail fast instead: NVIDIA Control Panel → Manage 3D settings → *CUDA – Sysmem Fallback Policy* → *Prefer No Sysmem Fallback*.
-* Expect about **3 h for 20k steps** with 2 cameras at batch 4. With one camera, batch 8 should fit at a similar speed, but that hasn't been measured yet.
-  Start training before you sleep, and test intermediate checkpoints.
+* Expect about **2.7 h for 20k steps** (one camera, batch 8, 160k samples, about 5 passes over 50 episodes of 20 s).
+  Two cameras at batch 4 run at the same speed but see half the samples, so give them more steps.
+  Start training early, and test intermediate checkpoints.
 * Data loading is not a bottleneck (`data_s` ≈ 0.004 s with pyav).
