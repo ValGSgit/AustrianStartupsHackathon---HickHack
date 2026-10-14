@@ -291,10 +291,17 @@ class RealBackend(Backend):
         cap = cv2.VideoCapture(self.cam["index"], cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam["width"])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam["height"])
-        frame = None
-        for _ in range(5):  # first frames are often dark while auto-exposure settles
+        # The first frames are dark while auto-exposure settles (measured: 5th frame at half the brightness, the
+        # vision model then can't read pencil marks). Read until the brightness stops changing (<= 1.5 s).
+        frame, prev = None, -1.0
+        for i in range(45):
             ok, f = cap.read()
-            frame = f if ok else frame
+            if not ok:
+                continue
+            frame, mean = f, float(f.mean())
+            if i >= 8 and abs(mean - prev) < 1.0:
+                break
+            prev = mean
         cap.release()
         return self._checked(frame[:, :, ::-1]) if frame is not None else None
 

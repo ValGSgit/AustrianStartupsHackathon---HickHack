@@ -9,9 +9,10 @@
 //   POST /api/stop           stop the running skill
 //   POST /api/hw             {action}  camera_on | camera_off | arm_on | arm_off  (laptop devices, status line)
 //   POST /api/look           one camera frame -> vision model, shown in the Live panel (no skill runs)
+//   POST /api/intent         {text}  camera frame + "move X to box B" -> object, box, agreement, GO/ASK (no skill runs)
 // All /api routes need the shared secret: "Authorization: Bearer <ROBOT_TOKEN>" (agent: ?token=...).
 
-import { describeScene, route, transcribe } from "./ai";
+import { describeScene, inferIntent, route, transcribe, type Intent } from "./ai";
 import { RobotSession, type CommandLog, type Env } from "./session";
 
 export { RobotSession };
@@ -62,6 +63,8 @@ export default {
 
     if (url.pathname === "/api/look") return json(await look(env, robot));
 
+    if (url.pathname === "/api/intent") return json(await intent(env, robot, String(body.text ?? "").trim()));
+
     if (url.pathname === "/api/run") {
       if (!body.skill) return json({ error: "skill required" }, 400);
       const r = await robot.run(body.skill, body.task ?? "");
@@ -103,6 +106,32 @@ async function look(env: Env, robot: DurableObjectStub<RobotSession>): Promise<{
     await robot.log("error", `vision failed: ${e}`);
     return { scene: "", ms: 0, error: String(e) };
   }
+}
+
+/** Intent check: does the vision model understand which object and which drawn box? Nothing moves. */
+async function intent(
+  env: Env, robot: DurableObjectStub<RobotSession>, text: string,
+): Promise<(Intent & { jpeg: string; instruction: string }) | { error: string }> {
+  if (!text) return { error: "type an instruction, e.g. 'move the orange disc to box B'" };
+  const state = await robot.getState();
+  if (!state.agentConnected) return { error: "robot agent is not connected (it provides the camera frame)" };
+  if (!(await robot.allowAi())) return { error: "rate limited, try again in a minute" };
+  let t = Date.now();
+  const jpeg = await robot.snapshot(5000);
+  if (!jpeg) {
+    await robot.log("error", "intent: no usable camera frame");
+    return { error: "no camera frame (camera index? lens covered?)" };
+  }
+  await robot.log("camera", `intent: snapshot from the robot camera (${Date.now() - t} ms)`);
+  await robot.log("intent", `"${text}" -> Mistral Small 3.1, 5 answers in parallel…`);
+  t = Date.now();
+  const r = await inferIntent(env.AI, jpeg, text);
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  await robot.log("intent", `${r.verdict}: ${r.answer.object ?? "?"} -> box ${r.box} · agreement ${pct(r.agreement)} ` +
+    `(box ${pct(r.boxAgreement)}, object ${pct(r.objectAgreement)})` +
+    (r.selfConfidence !== null ? ` · self ${Math.round(r.selfConfidence)}%` : "") + ` (${Date.now() - t} ms)`);
+  if (r.reasons.length) await robot.log("intent", `would ask a human: ${r.reasons.join("; ")}`);
+  return { ...r, jpeg, instruction: text };
 }
 
 async function handleCommand(

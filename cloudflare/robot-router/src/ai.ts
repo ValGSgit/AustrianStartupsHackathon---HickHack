@@ -131,3 +131,108 @@ export async function route(ai: Ai, instruction: string, skills: Skill[], scene:
   }
   throw lastError;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Intent check: "move the orange disc to box B" -> which object, which drawn box, how sure.
+// Same prompt and rules as host/intent_test.py (tested there on the real camera).
+
+export const BOXES = ["A", "B", "C", "D", "X", "Z"];
+
+export interface IntentAnswer {
+  object?: string;
+  object_where?: string;
+  target_box?: string;
+  target_where?: string;
+  boxes_seen?: string[];
+  confidence?: number;
+  problem?: string;
+}
+
+export interface Intent {
+  answer: IntentAnswer; // the temperature-0 answer: what the robot would act on
+  box: string;
+  verdict: "GO" | "ASK";
+  reasons: string[]; // why ASK
+  agreement: number; // 0..1, same object AND same box across all answers
+  boxAgreement: number;
+  objectAgreement: number;
+  selfConfidence: number | null; // the model's own 0..100 (usually over-confident; shown for comparison)
+  boxVotes: Record<string, number>;
+  objectVotes: Record<string, number>;
+  answers: IntentAnswer[];
+  ms: number;
+  model: string;
+}
+
+const intentPrompt = (instruction: string, boxes: string[]) =>
+  `You are the eyes of a robot arm. The image is from its camera, looking at a table.
+On the table there is paper with boxes (rectangles) drawn on it; each box has one letter inside: ${boxes.join(", ")}.
+Some boxes may be partly outside the picture or seen at a steep angle.
+
+The user says: "${instruction.replace(/"/g, "'")}"
+
+Work out what the user wants moved and into which lettered box. Answer with ONLY this JSON, no other text:
+{"object": "short name of the thing to move, with its colour",
+ "object_where": "where that object is now, in words (e.g. 'just above box D')",
+ "target_box": "one of ${JSON.stringify(boxes)} or 'none' if the instruction names no box or that box isn't visible",
+ "target_where": "where that box is in the picture, in words",
+ "boxes_seen": [letters you can actually read in the image],
+ "confidence": 0-100 how sure you are that you understood both the object and the box,
+ "problem": "anything unclear (object not visible, two candidates, box not found) or empty"}`;
+
+async function askIntent(ai: Ai, jpeg: string, prompt: string, temperature: number): Promise<IntentAnswer> {
+  try {
+    const out = (await ai.run(MODELS.vision, {
+      messages: [{ role: "user", content: [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpeg}` } },
+      ] }],
+      max_tokens: 300,
+      temperature,
+    })) as { response?: unknown };
+    if (out.response && typeof out.response === "object") return out.response as IntentAnswer;
+    const m = String(out.response ?? "").match(/\{[\s\S]*\}/); // models sometimes wrap the JSON in ``` or add a sentence
+    return m ? (JSON.parse(m[0]) as IntentAnswer) : { problem: `no JSON in answer: ${String(out.response).slice(0, 120)}` };
+  } catch (e) {
+    return { problem: `call failed: ${e}` };
+  }
+}
+
+const STOP = new Set(["the", "a", "an", "small", "little", "round", "flat", "object", "piece", "of", "thing", "big", "large"]);
+const words = (s: unknown) => new Set((String(s ?? "").toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => !STOP.has(w)));
+const boxOf = (a: IntentAnswer) => String(a.target_box ?? "none").trim().toUpperCase().replace(/^BOX\s+/, "");
+
+/** runs answers in parallel: the first at temperature 0 (the one the robot uses), the rest at 0.7 to measure stability. */
+export async function inferIntent(ai: Ai, jpeg: string, instruction: string, runs = 5, boxes = BOXES): Promise<Intent> {
+  const t0 = Date.now();
+  const prompt = intentPrompt(instruction, boxes);
+  const answers = await Promise.all(Array.from({ length: runs }, (_, i) => askIntent(ai, jpeg, prompt, i === 0 ? 0 : 0.7)));
+  const best = answers[0];
+  const box = boxOf(best);
+  const ref = words(best.object);
+  // same object = one name's words contain the other's ("orange eraser" ~ "orange"); "red pen" vs "blue pen" don't
+  const sameObj = answers.map((a) => {
+    const w = words(a.object);
+    return ref.size > 0 && w.size > 0 && ([...ref].every((x) => w.has(x)) || [...w].every((x) => ref.has(x)));
+  });
+  const sameBox = answers.map((a) => boxOf(a) === box);
+  const count = (xs: string[]) => xs.reduce<Record<string, number>>((m, x) => ((m[x] = (m[x] ?? 0) + 1), m), {});
+  const agreement = sameObj.filter((o, i) => o && sameBox[i]).length / runs;
+  const seen = (Array.isArray(best.boxes_seen) ? best.boxes_seen : []).map((b) => String(b).trim().toUpperCase());
+  const self = answers.map((a) => Number(a.confidence)).filter((c) => Number.isFinite(c));
+  // the model guesses even when unsure but writes the doubt into 'problem': gate on facts, not on its own score
+  const reasons = [
+    agreement < 0.8 ? `answers disagree (${Math.round(agreement * 100)}% < 80%)` : "",
+    !seen.includes(box) ? `box ${box} is not one it could read (${seen.join(", ") || "none"})` : "",
+    String(best.problem ?? "").trim() ? `model reports: ${best.problem}` : "",
+  ].filter(Boolean);
+  return {
+    answer: best, box, verdict: reasons.length ? "ASK" : "GO", reasons, agreement,
+    boxAgreement: sameBox.filter(Boolean).length / runs,
+    objectAgreement: sameObj.filter(Boolean).length / runs,
+    selfConfidence: self.length ? self.reduce((a, b) => a + b, 0) / self.length : null,
+    boxVotes: count(answers.map(boxOf)),
+    objectVotes: count(answers.map((a) => [...words(a.object)].join(" ") || "?")),
+    answers, ms: Date.now() - t0, model: MODELS.vision,
+  };
+}
