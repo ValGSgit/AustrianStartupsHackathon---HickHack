@@ -93,6 +93,34 @@ Checkpoints are saved to `outputs/train/<policy>/checkpoints/`, one every 5k ste
 Watch the log line `updt_s:… mem_gb:…`. If `updt_s` is well above ~0.6 s, GPU memory is spilling into system RAM.
 Stop the run, lower `batch_size` in `config.toml`, and start again with a new `--policy` name.
 
+### SmolVLA instead of (or next to) ACT
+
+[SmolVLA](https://huggingface.co/lerobot/smolvla_base) is a 450M vision-language-action model pretrained on
+community SO-100/101 data. It reads the **task text**, so one model can learn several instructions if your
+recordings use different task texts, and the Cloudflare router can pass it the user's words (skills with
+`instruction = true` in `config.toml`). It trains on the **same recordings** as ACT. One extra install:
+
+```powershell
+python -m uv pip install --python .venv\Scripts\python.exe "lerobot[smolvla]==0.6.1"   # adds transformers etc., keeps torch
+.venv\Scripts\python robot.py train --type smolvla                  # local GTX 1650, [train.smolvla] settings
+.venv\Scripts\python robot.py train --type smolvla --cloud          # Hugging Face A100 via HF Jobs (paid, needs hf auth login + dataset on the Hub)
+.venv\Scripts\python robot.py rollout --policy smolvla_pick_pen --task "Pick up the blue pen"
+```
+
+Measured on the GTX 1650 (4 GB), 2026-10-14:
+
+| | |
+|---|---|
+| inference (`sim/bench_smolvla.py`) | ~1.0 s per 50-step chunk (1.67 s of motion), 1.0 GiB |
+| fine-tuning, batch 4 | 1.12 s/step, 1.8 GB → 5k steps ≈ 1.6 h, LeRobot's 20k-step recipe ≈ 6 h |
+
+* Rollout uses LeRobot's real-time chunking (`--inference.type=rtc`, added automatically for SmolVLA), so the
+  next chunk is computed while the arm executes the current one instead of pausing ~1 s per chunk.
+* The base model names its cameras `camera1..3`. `robot.py` maps ours (`front`, then the next ones) onto them,
+  for training and for rollout, so keep the camera order in `config.toml` the same.
+* ACT vs SmolVLA: for one task in one fixed setup ACT is smaller and trains faster. SmolVLA is worth it for
+  several objects / instructions with one model. Train both on the same recordings and compare the success rate.
+
 ## 5. Run it
 
 ```powershell

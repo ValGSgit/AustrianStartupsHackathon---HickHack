@@ -50,6 +50,18 @@ use_amp = false                       # fp16 is ~5x SLOWER on a GTX 1650 (no ten
 save_freq = 5000
 num_workers = 2                       # dataloader workers (video decoding); raise if GPU util is low
 
+[train.smolvla]
+# robot.py train --type smolvla [--cloud]: fine-tunes SmolVLA (450M params, pretrained on community SO-100/101
+# data) on the SAME recordings as ACT. It reads the task text, so one model can learn several instructions
+# ("pick up the pen", "pick up the red cube") if the recordings use those task texts.
+# Inference on the GTX 1650: ~1.0 s per 50-step chunk, 1.0 GiB (sim/bench_smolvla.py); rollout uses RTC.
+base = "lerobot/smolvla_base"
+steps = 20000                         # LeRobot's recipe; ~4 h on an A100
+batch_size = 4                        # local GTX 1650 (see README "SmolVLA" for the measured speed)
+cloud = "a100-large"                  # HF Jobs flavor for --cloud (paid per second; `hf jobs hardware` lists prices)
+cloud_batch_size = 64
+cloud_timeout = "6h"
+
 [stage]
 # stage.py: rollout -> self-check -> retry. Compare reactivity settings with `stage.py eval` and keep the winner.
 duration_s = 20                       # one attempt: reach, grasp, lift, hold (rollout then returns to rest)
@@ -63,6 +75,16 @@ temporal_ensemble_coeff = 0.0         # 0.01 = re-plan every step + blend (ACT p
 #   policy / duration_s     -> real arm: robot.py rollout --policy <policy>
 #   replay_*                -> real arm: robot.py replay (exact recorded movement)
 #   sim_policy / sim_motion -> used when the agent runs with --sim
+#   instruction = true      -> the router also writes the task text ("Pick up the blue pen") and the agent
+#                              passes it to the policy (robot.py rollout --task). Only SmolVLA uses it; ACT
+#                              ignores text, so leave it off for ACT skills.
+#
+# SmolVLA skill, once a model is trained on recordings with several task texts (robot.py train --type smolvla):
+# [skills.pick_object]
+# description = "Picks up the object the user names (pen, cube, chess piece) and lifts it."
+# policy = "smolvla_pick_objects"
+# instruction = true
+# duration_s = 25
 [skills.pick_pen]
 description = "Picks up the pen lying on the table and lifts it up."
 policy = "act_pick_pen"

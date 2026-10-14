@@ -43,6 +43,9 @@ def main() -> None:
         preprocessor_overrides={"device_processor": {"device": device.type}},
     )
 
+    # our sim camera is "front"; a SmolVLA fine-tuned from smolvla_base keeps the base model's name, camera1
+    keys = sorted(k for k in cfg.input_features if k.startswith("observation.images."))
+    img_key = "observation.images.front" if "observation.images.front" in keys else keys[0]
     env = SO101PickEnv(a.obj)
     successes, frames = 0, []
     for ep in range(a.episodes):
@@ -53,7 +56,7 @@ def main() -> None:
         lifted = False
         for _ in range(a.steps):
             action = predict_action(
-                {"observation.state": obs.state, "observation.images.front": obs.image},
+                {"observation.state": obs.state, img_key: obs.image},
                 policy, device, pre, post, use_amp=False, task=TASKS[a.obj], robot_type="so101_follower_sim",
             )
             obs = env.step(action.cpu().numpy().reshape(-1))  # predict_action keeps the batch dim

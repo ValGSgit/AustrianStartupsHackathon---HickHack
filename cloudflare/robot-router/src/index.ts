@@ -50,7 +50,7 @@ export default {
     }
 
     if (req.method !== "POST") return json({ error: "not found" }, 404);
-    const body = (await req.json().catch(() => ({}))) as { text?: string; audio?: string; skill?: string };
+    const body = (await req.json().catch(() => ({}))) as { text?: string; audio?: string; skill?: string; task?: string };
 
     if (url.pathname === "/api/stop") return json({ sent: await robot.stop() });
 
@@ -64,7 +64,7 @@ export default {
 
     if (url.pathname === "/api/run") {
       if (!body.skill) return json({ error: "skill required" }, 400);
-      return json(await robot.run(body.skill));
+      return json(await robot.run(body.skill, body.task ?? ""));
     }
 
     if (url.pathname === "/api/command") return json(await handleCommand(env, robot, body));
@@ -138,12 +138,13 @@ async function handleCommand(
     log.decision = await route(env.AI, log.transcript, state.skills, log.scene);
     const pct = (log.decision.confidence * 100).toFixed(0);
     await robot.log("router", `-> ${log.decision.policy} (confidence ${pct}%) "${log.decision.say}" (${since(t)})`);
+    if (log.decision.task) await robot.log("router", `instruction for the policy: "${log.decision.task}"`);
 
     // 4. guardrails, in code rather than in the prompt
     if (log.decision.policy === "none") log.action = "none";
     else if (log.decision.confidence < CONFIDENCE_MIN) log.action = "needs_confirm";
     else {
-      const r = await robot.run(log.decision.policy);
+      const r = await robot.run(log.decision.policy, log.decision.task);
       log.action = r.ok ? "started" : r.reason.startsWith("busy") ? "busy" : "error";
       if (!r.ok) log.error = r.reason;
     }

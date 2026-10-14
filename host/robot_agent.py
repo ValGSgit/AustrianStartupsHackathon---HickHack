@@ -42,6 +42,17 @@ FRAME_HZ = 8  # live stream rate to the dashboard (each frame ~25 KB)
 PREVIEW_HZ = 5  # idle camera / arm preview rate
 
 
+def skill_info(name: str, s: dict) -> dict:
+    # instruction = true: the router writes the task text for the policy (SmolVLA follows it, ACT ignores it)
+    return {"name": name, "description": s["description"], "instruction": bool(s.get("instruction"))}
+
+
+def image_key(cfg) -> str:
+    """Our camera is "front"; SmolVLA's base model calls it camera1 (robot.py renames it the same way)."""
+    keys = [k for k in cfg.input_features if k.startswith("observation.images.")]
+    return "observation.images.front" if "observation.images.front" in keys or not keys else sorted(keys)[0]
+
+
 def jpeg_b64(rgb: np.ndarray, quality: int = 80) -> str:
     ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, quality])
     return base64.b64encode(buf.tobytes()).decode() if ok else ""
@@ -115,7 +126,7 @@ class Backend:
                     self.busy = True
                     self.stop_flag.clear()
                     self.send({"type": "status", "state": "running", "detail": f"running {msg['skill']}"})
-                    ok, detail = self.run(msg["skill"])
+                    ok, detail = self.run(msg["skill"], str(msg.get("task") or ""))
                     self.busy = False
                     self.send({"type": "done", "skill": msg["skill"], "ok": ok, "detail": detail, "jpeg": self.snapshot()})
             except Exception as e:  # report instead of dying - the stage demo must keep going
@@ -134,7 +145,7 @@ class Backend:
     def setup(self) -> None: ...
     def snapshot(self) -> str | None: ...
     def busy_snapshot(self) -> str | None: return None
-    def run(self, skill: str) -> tuple[bool, str]: ...
+    def run(self, skill: str, task: str = "") -> tuple[bool, str]: ...
     def on_stop(self) -> None: ...
     def hw(self, action: str) -> None: ...
     def hw_status(self) -> dict: ...
@@ -198,7 +209,7 @@ class RealBackend(Backend):
         super().__init__(send)
 
     def skills(self):
-        return [{"name": n, "description": s["description"]} for n, s in SKILLS.items()
+        return [skill_info(n, s) for n, s in SKILLS.items()
                 if "policy" in s or "replay_dataset" in s]
 
     # ---- devices
@@ -290,11 +301,13 @@ class RealBackend(Backend):
     def busy_snapshot(self):
         return self.live_jpeg
 
-    def run(self, skill):
+    def run(self, skill, task=""):
         s = SKILLS[skill]
         py = [sys.executable, str(ROOT / "robot.py")]
         if "policy" in s:
             cmd = py + ["rollout", "--policy", s["policy"], "--duration", str(s.get("duration_s", 25))]
+            if task and s.get("instruction"):
+                cmd += ["--task", task]
         else:
             cmd = py + ["replay", "--dataset", s["replay_dataset"], "--episode", str(s.get("replay_episode", 0))]
         # lerobot needs the camera and the COM port to itself (Windows: one process per device)
@@ -352,7 +365,7 @@ class SimBackend(Backend):
         super().__init__(send)
 
     def skills(self):
-        return [{"name": n, "description": s["description"]} for n, s in SKILLS.items()
+        return [skill_info(n, s) for n, s in SKILLS.items()
                 if "sim_policy" in s or "sim_motion" in s]
 
     def setup(self):
@@ -418,7 +431,7 @@ class SimBackend(Backend):
             self.policies[path] = (pol, pre, post, dev)
         return self.policies[path]
 
-    def run(self, skill):
+    def run(self, skill, task=""):
         s = SKILLS[skill]
         motion = s.get("sim_motion")
         self.t0 = time.perf_counter()
@@ -457,6 +470,9 @@ class SimBackend(Backend):
         self.log(f"{c.type.upper()} policy on {dev.type}: camera 640x480 + 6 joint angles in -> "
                  f"chunk of {getattr(c, 'chunk_size', '?')} future joint targets out, executes {getattr(c, 'n_action_steps', '?')} of them at 30 Hz")
         ensemble = getattr(c, "temporal_ensemble_coeff", None) is not None  # then it infers every step
+        img_key = image_key(c)
+        task = task if task and s.get("instruction") else s["description"]
+        self.log(f'task text for the policy: "{task}"' + ("" if c.type == "smolvla" else " (ACT ignores it)"))
         obs = self.env.observe()
         lifted = False
         for i in range(int(s.get("duration_s", 8) * 30)):
@@ -464,8 +480,8 @@ class SimBackend(Backend):
                 return False, "stopped"
             t = time.perf_counter()
             infer = i % 30 == 0 if ensemble else len(getattr(pol, "_action_queue", ())) == 0
-            act = predict_action({"observation.state": obs.state, "observation.images.front": obs.image},
-                                 pol, dev, pre, post, use_amp=False, task=s["description"], robot_type="so101_follower_sim")
+            act = predict_action({"observation.state": obs.state, img_key: obs.image},
+                                 pol, dev, pre, post, use_amp=False, task=task, robot_type="so101_follower_sim")
             target = act.cpu().numpy().reshape(-1)
             if infer:
                 ms = (time.perf_counter() - t) * 1000

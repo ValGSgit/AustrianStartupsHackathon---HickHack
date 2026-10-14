@@ -10,6 +10,7 @@ Add --dry-run before the command to print the lerobot command instead of running
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -110,6 +111,26 @@ def dataset_root(name: str) -> Path:
 
 def local_policy_dir(name: str) -> Path:
     return OUTPUTS_DIR / name / "checkpoints" / "last" / "pretrained_model"
+
+
+def smolvla_rename_map() -> str:
+    """SmolVLA's base model names its cameras camera1..3; ours are named in config.toml ([cameras.front] ...).
+    The same map is needed when fine-tuning and at rollout, so the checkpoint keeps the base model's names."""
+    names = list(CONFIG.get("cameras", {}))[:3]
+    return json.dumps({f"observation.images.{n}": f"observation.images.camera{i + 1}" for i, n in enumerate(names)})
+
+
+def policy_config(path: str) -> dict:
+    """config.json of a local checkpoint or Hub policy ({} if it can't be read)."""
+    try:
+        local = Path(path) / "config.json"
+        if local.exists():
+            return json.loads(local.read_text(encoding="utf-8"))
+        from huggingface_hub import hf_hub_download
+
+        return json.loads(Path(hf_hub_download(path, "config.json")).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------- commands
@@ -240,6 +261,8 @@ def cmd_replay(a):
 def cmd_train(a):
     tr = CONFIG["train"]
     dataset = a.dataset or CONFIG["hf"]["dataset"]
+    if a.type == "smolvla":
+        return train_smolvla(a, dataset)
     policy = a.policy or CONFIG["hf"]["policy"]
     out = OUTPUTS_DIR / policy
 
@@ -272,6 +295,49 @@ def cmd_train(a):
     )
 
 
+def train_smolvla(a, dataset: str):
+    """Fine-tune SmolVLA from [train.smolvla] base on the same recordings ACT uses. --cloud runs it on HF Jobs."""
+    sv = CONFIG["train"].get("smolvla", {})
+    policy = a.policy or f"smolvla_{dataset}"
+    out = OUTPUTS_DIR / policy
+    if a.resume:
+        cfg = out / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
+        run("lerobot-train", f"--config_path={cfg}", "--resume=true", *([f"--steps={a.steps}"] if a.steps else []))
+        return
+    if out.exists() and not a.cloud:
+        sys.exit(f"{out} already exists. Use --resume to continue it, or pick another --policy name.")
+    if a.cloud:  # the job runs on a Hugging Face GPU: dataset in, model out, both via the Hub
+        where = [f"--dataset.repo_id={hf_repo(dataset)}", f"--job.target={a.cloud}",
+                 f"--job.timeout={sv.get('cloud_timeout', '6h')}", "--policy.push_to_hub=true"]
+        batch = a.batch_size or sv.get("cloud_batch_size", 64)
+    else:
+        where = [f"--dataset.repo_id={hf_repo(dataset, local_ok=a.no_push)}", f"--dataset.root={dataset_root(dataset)}",
+                 f"--policy.push_to_hub={str(not a.no_push).lower()}", f"--num_workers={CONFIG['train']['num_workers']}"]
+        batch = a.batch_size or sv.get("batch_size", 4)
+    base = sv.get("base", "lerobot/smolvla_base")
+    if not a.cloud and not Path(base).exists():
+        # Windows: lerobot turns "lerobot/smolvla_base" into "lerobot\smolvla_base" and fails, so pass a local copy
+        from huggingface_hub import snapshot_download
+
+        base = snapshot_download(base)
+    run(
+        "lerobot-train",
+        f"--policy.path={base}",
+        f"--rename_map={smolvla_rename_map()}",
+        *where,
+        "--policy.device=cuda",
+        f"--policy.repo_id={hf_repo(policy, local_ok=a.no_push and not a.cloud)}",
+        "--policy.private=true",
+        f"--steps={a.steps or sv.get('steps', 20000)}",
+        f"--batch_size={batch}",
+        f"--save_freq={CONFIG['train']['save_freq']}",
+        "--log_freq=100",
+        f"--output_dir={out}",
+        f"--job_name={policy}",
+        f"--wandb.enable={str(a.wandb).lower()}",
+    )
+
+
 def cmd_rollout(a):
     policy = a.policy or CONFIG["hf"]["policy"]
     local = local_policy_dir(policy)
@@ -282,12 +348,20 @@ def cmd_rollout(a):
     else:
         path = hf_repo(policy)  # download from the Hub
     print(f"policy: {path}")
+    extra = []
+    pc = policy_config(path)
+    if pc.get("type") in ("smolvla", "pi0", "pi05"):
+        # ~1 s per chunk on the GTX 1650: real-time chunking computes the next chunk while this one runs
+        extra.append("--inference.type=rtc")
+        if any(k.startswith("observation.images.camera") for k in pc.get("input_features", {})):
+            extra.append(f"--rename_map={smolvla_rename_map()}")
     run(
         "lerobot-rollout",
         "--strategy.type=base",
         f"--policy.path={path}",
         *robot_args(),
-        f"--task={CONFIG['task']['description']}",
+        *extra,
+        f"--task={a.task or CONFIG['task']['description']}",
         f"--duration={a.duration}",
         f"--display_data={str(a.display).lower()}",
         *([f"--robot.max_relative_target={float(a.max_step)}"] if a.max_step else []),
@@ -336,7 +410,13 @@ def main():
     s.add_argument("--dataset")
     s.set_defaults(fn=cmd_replay)
 
-    s = sub.add_parser("train", help="train an ACT policy on the local GPU")
+    s = sub.add_parser("train", help="train an ACT (local GPU) or SmolVLA (cloud or local) policy")
+    s.add_argument("--type", choices=["act", "smolvla"], default="act",
+                   help="act: small, one task, trains on the GTX 1650. smolvla: fine-tunes lerobot/smolvla_base, "
+                        "follows the task text ([train.smolvla])")
+    s.add_argument("--cloud", metavar="FLAVOR", nargs="?", const="__config__",
+                   help="(smolvla) train on a Hugging Face GPU via HF Jobs, e.g. a100-large (paid, needs `hf auth login`); "
+                        "no value = [train.smolvla] cloud")
     s.add_argument("--dataset")
     s.add_argument("--policy", help="output/policy name (default: [hf] policy)")
     s.add_argument("--steps", type=int)
@@ -349,6 +429,7 @@ def main():
     s = sub.add_parser("rollout", help="run a trained policy on the robot")
     s.add_argument("--policy", help="policy name, local checkpoint folder, or Hub repo id")
     s.add_argument("--duration", type=int, default=60, help="seconds to run")
+    s.add_argument("--task", help="task text for the policy (default: [task] description). SmolVLA follows it")
     s.add_argument("--display", action="store_true", help="show cameras in rerun (costs some fps)")
     s.add_argument("--max-step", type=float, metavar="N",
                    help="safety: cap each joint's move per 30 Hz step to N position units (-100..100 scale); "
@@ -357,6 +438,8 @@ def main():
 
     a = p.parse_args()
     DRY_RUN = a.dry_run
+    if getattr(a, "cloud", None) == "__config__":
+        a.cloud = CONFIG["train"].get("smolvla", {}).get("cloud", "a100-large")
     a.fn(a)
 
 

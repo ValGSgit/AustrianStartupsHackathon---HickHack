@@ -93,7 +93,11 @@ export class RobotSession extends DurableObject<Env> {
     switch (msg.type) {
       case "hello":
         await this.patch({
-          skills: (msg.skills ?? []).map((s: Skill) => ({ name: String(s.name), description: String(s.description) })),
+          skills: (msg.skills ?? []).map((s: Skill) => ({
+            name: String(s.name),
+            description: String(s.description),
+            instruction: !!s.instruction,
+          })),
           mode: String(msg.mode ?? "real"),
           status: "idle",
           detail: `agent ready (${msg.mode ?? "real"})`,
@@ -188,14 +192,15 @@ export class RobotSession extends DurableObject<Env> {
     return jpeg;
   }
 
-  async run(skill: string): Promise<{ ok: boolean; reason: string }> {
+  async run(skill: string, task = ""): Promise<{ ok: boolean; reason: string }> {
     const s = await this.state();
     const ws = this.agent();
     if (!ws) return { ok: false, reason: "robot agent is not connected" };
     if (!s.skills.some((k) => k.name === skill)) return { ok: false, reason: `unknown skill '${skill}'` };
     if (s.status === "running") return { ok: false, reason: `busy running '${s.current}'` };
-    ws.send(JSON.stringify({ type: "run", skill }));
-    this.event("run", `sent '${skill}' to the ${s.mode} robot`);
+    const text = s.skills.find((k) => k.name === skill)?.instruction ? task : "";
+    ws.send(JSON.stringify({ type: "run", skill, task: text }));
+    this.event("run", `sent '${skill}' to the ${s.mode} robot` + (text ? ` with the instruction "${text}"` : ""));
     await this.ctx.storage.delete("img:after");
     await this.patch({ status: "running", current: skill, detail: `running ${skill}` });
     return { ok: true, reason: "started" };

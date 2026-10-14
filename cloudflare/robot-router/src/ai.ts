@@ -12,12 +12,14 @@ export const MODELS = {
 export interface Skill {
   name: string;
   description: string;
+  instruction?: boolean; // the policy reads a task text (SmolVLA): the router writes it
 }
 
 export interface Decision {
   policy: string; // a skill name, or "none"
   confidence: number;
   say: string;
+  task: string; // instruction for a skill that takes one, e.g. "Pick up the blue pen"; "" otherwise
 }
 
 export async function transcribe(ai: Ai, audioBase64: string): Promise<string> {
@@ -83,11 +85,13 @@ export async function route(ai: Ai, instruction: string, skills: Skill[], scene:
   const names = skills.map((s) => s.name);
   const system =
     "You control a robot arm that can ONLY run these skills:\n" +
-    skills.map((s) => `- ${s.name}: ${s.description}`).join("\n") +
+    skills.map((s) => `- ${s.name}: ${s.description}${s.instruction ? " [takes an instruction]" : ""}`).join("\n") +
     `\nCamera sees: ${scene || "(no camera snapshot available)"}\n` +
     "Pick exactly one skill that does what the user asks, or 'none' if no skill matches or the object it " +
     "needs is clearly missing. confidence is 0..1. 'say' is one short friendly sentence for the audience " +
-    "describing what the robot will do (or why it won't).";
+    "describing what the robot will do (or why it won't). 'task': for a skill marked [takes an instruction], " +
+    "the user's request as one short imperative sentence for the robot's model, naming the object and its " +
+    "color if known (e.g. 'Pick up the blue pen'); otherwise an empty string.";
 
   const schema = {
     type: "object",
@@ -95,8 +99,9 @@ export async function route(ai: Ai, instruction: string, skills: Skill[], scene:
       policy: { type: "string", enum: [...names, "none"] },
       confidence: { type: "number" },
       say: { type: "string" },
+      task: { type: "string" },
     },
-    required: ["policy", "confidence", "say"],
+    required: ["policy", "confidence", "say", "task"],
   };
 
   let lastError: unknown;
@@ -118,6 +123,7 @@ export async function route(ai: Ai, instruction: string, skills: Skill[], scene:
         policy: [...names, "none"].includes(d.policy) ? d.policy : "none",
         confidence: Math.max(0, Math.min(1, Number(d.confidence) || 0)),
         say: String(d.say ?? ""),
+        task: String(d.task ?? "").trim(),
       };
     } catch (e) {
       lastError = e; // JSON mode can fail ("JSON Mode couldn't be met") - retry once
