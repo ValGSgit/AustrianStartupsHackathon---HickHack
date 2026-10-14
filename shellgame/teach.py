@@ -266,6 +266,22 @@ def cmd_test_slot(a):
         A.release(arm)
 
 
+def cmd_copy_slot(a):
+    """Same reach, other direction: copy a good slot's 4 poses and only turn the base (shoulder_pan)."""
+    poses = A.load_poses()
+    src = [f"{k}_{a.src}" for k in ("above", "grip", "in", "lift")]
+    missing = [n for n in src if n not in poses]
+    if missing:
+        sys.exit(f"slot {a.src} is not fully taught (missing {', '.join(missing)})")
+    turn = a.pan - poses[f"above_{a.src}"]["shoulder_pan.pos"]
+    for name in src:
+        pose = dict(poses[name])
+        pose["shoulder_pan.pos"] += turn
+        A.save_pose(name.replace(f"_{a.src}", f"_{a.dst}"), pose)
+    print(f"slot {a.dst} = slot {a.src} turned {turn:+.1f} deg (base at {a.pan:.1f}). "
+          f"Next: teach.py go above_{a.dst}, tape the spot under the gripper, then test-slot {a.dst}.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--fake", action="store_true", help="no hardware")
@@ -284,6 +300,11 @@ def main():
     s.add_argument("slot", type=int, choices=[1, 2, 3, 4])
     s.add_argument("--seconds", type=float, default=2.5)
     s.set_defaults(fn=cmd_test_slot)
+    s = sub.add_parser("copy-slot", help="copy slot SRC's poses to slot DST, base turned to --pan degrees")
+    s.add_argument("src", type=int, choices=[1, 2, 3, 4])
+    s.add_argument("dst", type=int, choices=[1, 2, 3, 4])
+    s.add_argument("--pan", type=float, required=True, help="base rotation (shoulder_pan) for the new slot")
+    s.set_defaults(fn=cmd_copy_slot)
     for s in sub.choices.values():  # --fake also accepted after the sub-command
         s.add_argument("--fake", action="store_true", default=argparse.SUPPRESS)
     a = p.parse_args()
