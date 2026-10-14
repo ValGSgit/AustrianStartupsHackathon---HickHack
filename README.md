@@ -4,6 +4,9 @@ Teach the SO-101 follower arm a pick & place task from ~50 teleoperated demos
 (leader arm + camera), train an **ACT** policy on a local GPU with
 [LeRobot](https://huggingface.co/docs/lerobot), and run it live on stage.
 
+**Cloudflare layer (design):** [docs/architecture.md](docs/architecture.md) shows how a voice or text command goes through
+Workers AI (speech-to-text, vision, an LLM router) and gets translated into the right trained policy on the arm.
+
 Everything goes through `robot.py`, which builds the `lerobot-*` commands from
 `config.toml`. That keeps ports, calibration ids and camera settings identical
 between recording and rollout, so you never retype the long flag lists.
