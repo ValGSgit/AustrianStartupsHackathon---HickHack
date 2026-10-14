@@ -234,11 +234,12 @@ class SimBackend(Backend):
 
         from lerobot.common.control_utils import predict_action
 
-        path = str(ROOT / s["sim_policy"])
+        # resolve checkpoints/last (a junction) so a newer checkpoint is picked up without restarting the agent
+        path = os.path.realpath(ROOT / s["sim_policy"])
         if not Path(path).exists():
             return False, f"sim policy not trained yet: {s['sim_policy']}"
         if path not in self.policies:
-            self.log(f"loading policy {s['sim_policy']}")
+            self.log(f"loading policy {Path(path).relative_to(ROOT) if Path(path).is_relative_to(ROOT) else path}")
         pol, pre, post, dev = self._policy(path)
         pol.reset(); pre.reset(); post.reset()
         c = pol.config

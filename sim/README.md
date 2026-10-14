@@ -133,7 +133,7 @@ Measured on 2026-10-14:
 | leader → sim over UDP (wave test motion) | 30 packets/s, joints follow |
 | dataset made in the container → loaded on the host | OK (decodes, same features) |
 | ACT trained on 50 sim demos, 5k steps, 20 unseen pen positions | **12/20 = 60 %** (earlier run, degree units and a farther workspace) |
-| same, after switching to real-robot units + realistic workspace | training in progress, see `outputs/train_sim_pick_pen.log` |
+| same, after switching to real-robot units + realistic workspace, 10k steps (`act_sim_pick_pen`) | **15/20 = 75 %** lifted ≥ 4 cm; 11/20 still held at the end of the episode (4 lifted, then dropped). 5 misses never lifted it |
 
 Docker Desktop on this laptop only gives the container 2 CPUs. More CPUs (Docker Desktop → Settings →
 Resources, or `.wslconfig`) make the camera faster.
