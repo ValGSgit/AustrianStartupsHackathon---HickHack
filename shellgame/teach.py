@@ -26,6 +26,7 @@ import arm as A  # noqa: E402
 MAX_START_DIFF = 30.0   # degrees: refuse to start copying when leader and follower differ more than this
 BLOCKED_DIFF = 25.0     # degrees between command and position that count as "not following"
 BLOCKED_SECONDS = 1.0   # ...for this long: something blocks the arm, stop before a motor overloads
+HAND_SQUEEZE = 5.0      # gripper units (0 = closed) added on top of a hand-taught grip so the jaws hold the cup
 FAKE_POSES = A.POSES_FILE.with_name("poses_fake.json")
 
 HINTS = {
@@ -173,6 +174,9 @@ def cmd_teach(a):
                 if cmd and steps[i].startswith("grip_"):
                     # keep the leader's squeeze: the follower's gripper is stopped by the cup, the command is not
                     pose["gripper.pos"] = cmd["gripper.pos"]
+                elif a.hand and steps[i].startswith("grip_"):
+                    # by hand the jaws only touch the cup; command a bit further closed so they squeeze
+                    pose["gripper.pos"] = max(0.0, pose["gripper.pos"] - HAND_SQUEEZE)
                 A.save_pose(steps[i], pose)
                 print(f"   saved {steps[i]}: " + " ".join(f"{k[:-4]}={v:.1f}" for k, v in pose.items()))
                 i += 1
