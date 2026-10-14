@@ -81,9 +81,19 @@ def test_few_samples():
             raise AssertionError(f"{n} samples should raise")
         except ValueError:
             pass
-    m = R.ReachModel.fit(make_samples([GRID8[i] for i in (0, 2, 5, 7)]))  # 4 corners -> linear
+    m = R.ReachModel.fit(make_samples([GRID8[i] for i in (0, 2, 5)]))  # 3 -> linear
     assert all(c[2].shape[0] == 3 for c in m.coef.values())
-    assert max_err(m, [(320, 330)]) < 6.0  # linear is coarse but sane in the middle
+    m = R.ReachModel.fit(make_samples([GRID8[i] for i in (0, 2, 5, 7)]))  # 4 -> linear + u^2
+    assert all(c[2].shape[0] == 4 for c in m.coef.values())
+    assert max_err(m, [(320, 330)]) < 6.0
+
+
+def test_row_of_cups():
+    """The real layout: 4 spots in one row (v almost constant) + 1 sample just in front of the row."""
+    row = [(135, 317), (258, 322), (382, 328), (505, 334), (320, 370)]
+    m = R.ReachModel.fit(make_samples(row))
+    err = max_err(m, [(200, 320), (320, 325), (440, 331)])
+    assert err < 3.0, err
 
 
 def test_inside_and_warning():

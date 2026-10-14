@@ -27,9 +27,15 @@ RIDGE = 1e-3
 WARN_DEG = 5.0
 
 
-def features(uv: np.ndarray, quadratic: bool) -> np.ndarray:
+def n_terms(n_samples: int) -> int:
+    """3 = linear; 4 = + u^2 (a row of cups: the arm bends differently in the middle than at the ends); 6 = full."""
+    return 6 if n_samples >= 6 else 4 if n_samples >= 4 else 3
+
+
+def features(uv: np.ndarray, terms) -> np.ndarray:
+    terms = 6 if terms is True else 3 if terms is False else terms
     u, v = uv[:, 0], uv[:, 1]
-    cols = [np.ones_like(u), u, v] + ([u * v, u * u, v * v] if quadratic else [])
+    cols = [np.ones_like(u), u, v, u * u, u * v, v * v][:terms]
     return np.stack(cols, axis=1)
 
 
@@ -38,8 +44,9 @@ def solve(uv: np.ndarray, y: np.ndarray) -> tuple:
     uv is standardised over the samples first, so the ridge shrinks every term about equally."""
     if len(uv) < 3:
         raise ValueError(f"need at least 3 samples, got {len(uv)}")
-    c, sc = uv.mean(axis=0), np.maximum(uv.std(axis=0), 1e-3)
-    X = features((uv - c) / sc, quadratic=len(uv) >= 6)
+    # one common scale for u and v: cups in a row barely differ in v, and a per-axis scale would blow that noise up
+    c, sc = uv.mean(axis=0), max(float(uv.std(axis=0).max()), 1e-3)
+    X = features((uv - c) / sc, n_terms(len(uv)))
     D = np.eye(X.shape[1]) * RIDGE
     D[0, 0] = 0.0
     return c, sc, np.linalg.solve(X.T @ X + D, X.T @ y)
@@ -47,7 +54,7 @@ def solve(uv: np.ndarray, y: np.ndarray) -> tuple:
 
 def apply(fit: tuple, uv: np.ndarray) -> np.ndarray:
     c, sc, coef = fit
-    return features((uv - c) / sc, quadratic=coef.shape[0] == 6) @ coef
+    return features((uv - c) / sc, coef.shape[0]) @ coef
 
 
 class ReachModel:
@@ -179,7 +186,7 @@ def cmd_check(a):
     bad = []
     for kind, j in joints.items():
         n = len(m.uv[kind])
-        model = "quadratic" if n - 1 >= 6 else "linear" if n - 1 >= 3 else "too few"
+        model = {6: "quadratic", 4: "row (u^2)", 3: "linear"}[n_terms(n - 1)] if n - 1 >= 3 else "too few"
         print(f"  {kind:<6} ({n} smp, {model:<9}) " + "  ".join(f"{e:13.2f}" for e in j.values())
               + f"  {np.mean(list(j.values())):7.2f}")
         bad += [f"{kind}.{k[:-4]} {e:.1f}" for k, e in j.items() if e > WARN_DEG]
