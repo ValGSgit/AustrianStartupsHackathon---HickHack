@@ -44,12 +44,12 @@ SCENE_XML = """
   <asset>
     <texture type="2d" name="wood" builtin="flat" rgb1="0.62 0.5 0.38" width="64" height="64"/>
     <material name="table" texture="wood" rgba="1 1 1 1"/>
-    <material name="mat" rgba="0.15 0.15 0.17 1"/>
+    <material name="mat" rgba="0.15 0.15 0.17 1"/>{sheet_asset}
   </asset>
   <worldbody>
     <light pos="0.3 0 1.2" dir="0 0 -1" directional="true" diffuse="0.6 0.6 0.6"/>
     <geom name="table" type="box" pos="0.15 0 -0.03" size="0.45 0.4 0.03" material="table" friction="1 0.005 0.0001"/>
-    <geom name="mat" type="box" pos="0.18 0 0.0005" size="0.12 0.16 0.0005" material="mat" contype="0" conaffinity="0"/>
+{mat_geom}
     <camera name="front" pos="0.62 0 0.42" xyaxes="0 1 0 -0.62 0 0.78" fovy="55"/>
     <body name="object" pos="0.25 0 0.02">
       <freejoint name="object"/>
@@ -68,6 +68,14 @@ OBJECTS = {
     'mass="0.015" friction="1.5 0.01 0.001" condim="4" solref="0.006 1"/>',
 }
 OBJ_REST_Z = {"cube": 0.0125, "pen": 0.006}
+
+MAT_GEOM = ('<geom name="mat" type="box" pos="0.18 0 0.0005" size="0.12 0.16 0.0005" material="mat" '
+            'contype="0" conaffinity="0"/>')
+# sheet=True: the printed ArUco sheet of host/workspace.py instead of the dark mat (skills + perception tests)
+SHEET_ASSET = ('\n    <texture type="2d" name="sheet" file="{png}"/>'
+               '\n    <material name="sheet" texture="sheet" texrepeat="1 1" texuniform="false" rgba="1 1 1 1"/>')
+SHEET_GEOM = ('<geom name="mat" type="plane" pos="{x} {y} 0.0006" euler="0 0 {yaw}" size="{hx} {hy} 0.01" '
+              'material="sheet" contype="0" conaffinity="0"/>')
 
 
 # Half of each arm joint's travel (rad), from the official MJCF = the range swept during calibration.
@@ -103,15 +111,21 @@ class Obs:
 class SO101PickEnv:
     """Physics runs at 500 Hz; one `step()` is one 30 Hz control tick, like the real robot loop."""
 
-    def __init__(self, obj: str = "cube", render: bool = True):
+    def __init__(self, obj: str = "cube", render: bool = True, sheet: bool = False):
         if obj not in OBJECTS:
             raise ValueError(f"obj must be one of {list(OBJECTS)}")
         if not (MODEL_DIR / ROBOT_XML).exists():
             raise FileNotFoundError(f"{ROBOT_XML} missing - run: python sim/fetch_model.py (--lowpoly)")
         self.obj = obj
         xml = SCENE_XML.replace("{object_geom}", OBJECTS[obj]).replace("{robot_xml}", ROBOT_XML).replace("{w}", str(CAM_W)).replace("{h}", str(CAM_H))
+        self.sheet = sheet
+        if sheet:
+            xml = xml.replace("{sheet_asset}", SHEET_ASSET.replace("{png}", _sheet_png())).replace("{mat_geom}", SHEET_GEOM.format(
+                **_sheet_geom()))
+        else:
+            xml = xml.replace("{sheet_asset}", "").replace("{mat_geom}", MAT_GEOM)
         # Write next to the robot MJCF so its relative mesh paths resolve.
-        scene = MODEL_DIR / f"_scene_{obj}_{ROBOT_XML[:-4]}.xml"
+        scene = MODEL_DIR / f"_scene_{obj}_{ROBOT_XML[:-4]}{'_sheet' if sheet else ''}.xml"
         scene.write_text(xml)
         self.model = _add_finger_pads(mujoco.MjSpec.from_file(str(scene)))
         self.data = mujoco.MjData(self.model)
@@ -177,6 +191,31 @@ class SO101PickEnv:
     def close(self) -> None:
         if self.renderer:
             self.renderer.close()
+
+
+def _sheet_png() -> str:
+    import sys
+
+    import cv2
+
+    sys.path.insert(0, str(MODEL_DIR.parent.parent / "host"))
+    import workspace
+
+    png = MODEL_DIR / "_workspace_sheet.png"
+    # MuJoCo maps texture column -> plane +x and row 0 -> plane +y; the printout has image up = +x, left = +y
+    img = workspace.sheet_image(px_per_m=4000)
+    cv2.imwrite(str(png), np.ascontiguousarray(np.rot90(img, -1)))
+    return png.name
+
+
+def _sheet_geom() -> dict:
+    import sys
+
+    sys.path.insert(0, str(MODEL_DIR.parent.parent / "host"))
+    import workspace
+
+    p = workspace.DEFAULT_POSE
+    return {"x": p["x"], "y": p["y"], "yaw": p["yaw"], "hx": workspace.SHEET_X / 2, "hy": workspace.SHEET_Y / 2}
 
 
 PAD_PARALLEL_RAD = -0.06
