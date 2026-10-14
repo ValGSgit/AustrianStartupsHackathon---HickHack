@@ -1,0 +1,51 @@
+# Single source of truth for the robot setup.
+# robot.py builds every lerobot command from this file, so recording and
+# rollout always use the same ports, ids and camera keys/resolution/fps.
+# (A mismatch between record and rollout is the #1 reason a policy "does nothing".)
+
+[hf]
+user = "CHANGE_ME"                    # your Hugging Face username (hf auth whoami)
+dataset = "so101_pick_place"          # -> <user>/<dataset> on the Hub
+policy = "act_so101_pick_place"       # -> <user>/<policy> on the Hub
+
+[task]
+# Natural-language task string stored in the dataset (also used by SmolVLA if you switch later).
+description = "Pick up the cube and place it in the bin"
+episode_time_s = 20                   # long enough to finish one pick & place calmly
+reset_time_s = 10                     # time to put the cube back between episodes
+fps = 30
+
+[follower]
+type = "so101_follower"
+port = "COM3"                         # find with: python robot.py find-port
+id = "follower"                       # calibration file name - never change after calibrating
+
+[leader]
+type = "so101_leader"
+port = "COM4"
+id = "leader"
+
+# One table per camera. The table name becomes the camera key in the dataset
+# (observation.images.<name>). Find indexes with: python robot.py find-cameras
+# Windows can reorder webcam indexes after a replug - re-check before recording.
+[cameras.front]
+index = 0
+width = 640
+height = 480
+fps = 30
+
+# Uncomment for a second (e.g. wrist) camera. Two views help ACT a lot with grasping.
+# [cameras.wrist]
+# index = 1
+# width = 640
+# height = 480
+# fps = 30
+
+[train]
+# Measured on the GTX 1650 (4 GB), ACT, 640x480 cameras - see README "GPU benchmark".
+# Keep GPU memory under ~3.3 GB: above that Windows spills into system RAM and a step gets ~10x slower.
+steps = 20000                         # ACT on ~50 episodes: 20k-40k steps is typical
+batch_size = 4                        # 4 fits 2 cameras (~2.2 GB, ~0.5 s/step); 1 camera can try 8
+use_amp = false                       # fp16 is ~5x SLOWER on a GTX 1650 (no tensor cores). true on RTX cards.
+save_freq = 5000
+num_workers = 2                       # dataloader workers (video decoding); raise if GPU util is low
