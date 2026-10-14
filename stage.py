@@ -115,17 +115,27 @@ def live_view(setup: dict, cache: dict):
     return cache.get("view"), cache.get("ok", False)
 
 
-def run_attempt(cmd: list[str], title: str, sub: str, last_img, setup: dict) -> str:
-    """Runs one rollout while keeping the status window alive. Returns 'done' or 'estop'."""
+def run_attempt(cmd: list[str], title: str, sub: str, last_img, setup: dict):
+    """Runs one rollout while keeping the status window alive.
+
+    Returns (status, live_ok, proof): status 'done' or 'estop'; live_ok = the object stayed in the target zone for
+    hold_s during the attempt (the pen-lift check: by the end the arm has returned to rest); proof = that frame.
+    """
     print(">", " ".join(cmd), flush=True)
     LIVE_FRAME.unlink(missing_ok=True)
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "LIVE_FRAME": str(LIVE_FRAME)}
     proc = subprocess.Popen(cmd, env=env)
     t0 = time.time()
     cache: dict = {}
+    hold_s = setup.get("hold_s", 1.0)
+    since, live_ok, proof = None, False, None
     while proc.poll() is None:
         view, in_box = live_view(setup, cache)
-        live = f"live: {'cube in box' if in_box else 'working'}" if view is not None else "starting..."
+        since = (since or time.time()) if in_box else None
+        if since and time.time() - since >= hold_s and not live_ok:
+            live_ok, proof = True, view
+            say(f"Verified. {goal(setup)}")
+        live = f"live: {goal(setup) if in_box else 'working'}" if view is not None else "starting..."
         k = show(screen(title, GREEN if in_box else AMBER,
                         f"{sub}\n{live}\n{time.time() - t0:4.0f} s   (ESC = emergency stop)",
                         view if view is not None else last_img), 50)
@@ -135,10 +145,22 @@ def run_attempt(cmd: list[str], title: str, sub: str, last_img, setup: dict) -> 
             proc.wait()
             show(screen("EMERGENCY STOP", RED, "arm frozen in place - cut follower power if needed"), 1)
             say("Emergency stop")
-            return "estop"
+            return "estop", False, None
     if proc.returncode != 0:
         print(f"rollout exited with code {proc.returncode}", flush=True)
-    return "done"
+    return "done", live_ok, proof
+
+
+def goal(setup: dict) -> str:
+    return setup.get("goal", "pen lifted")
+
+
+def verdict(live_ok: bool, proof, setup: dict):
+    """Live success counts first; otherwise one more look after the arm returned (the object-in-box case)."""
+    if live_ok:
+        return True, {"live": True}, proof
+    ok, stats, img = check_now(setup)
+    return ok, {"live": False, **stats}, img
 
 
 def check_now(setup: dict):
@@ -160,25 +182,25 @@ def cmd_demo(a):
     last_img = None
 
     while True:
-        k = show(screen("Ready", FG, "place the cube - SPACE to start, q to quit", last_img), 50)
+        k = show(screen("Ready", FG, "place the pen - SPACE to start, q to quit", last_img), 50)
         if k == ord("q"):
             break
         if k != ord(" "):
             continue
         for attempt in range(1, a.attempts + 1):
             say("On it" if attempt == 1 else "Missed. Trying again")
-            if run_attempt(cmd, f"Attempt {attempt}/{a.attempts}", "robot working", last_img, setup) == "estop":
+            status, live_ok, proof = run_attempt(cmd, f"Attempt {attempt}/{a.attempts}", "robot working", last_img, setup)
+            if status == "estop":
                 while show(screen("EMERGENCY STOP", RED, "SPACE to reset"), 50) != ord(" "):
                     pass
                 break
-            show(screen("Checking...", AMBER, "looking at the box", last_img), 1)
-            ok, stats, last_img = check_now(setup)
+            show(screen("Checking...", AMBER, "", last_img), 1)
+            ok, stats, last_img = verdict(live_ok, proof, setup)
             log_row(a.label or "demo", policy, react, "-", ok, "" if ok else "auto", f"demo attempt {attempt} {stats}")
             if ok:
-                say("Verified. The cube is in the box")
-                show(screen("VERIFIED", GREEN, f"cube in box  (attempt {attempt})", last_img), 1)
+                show(screen("VERIFIED", GREEN, f"{goal(setup)}  (attempt {attempt})", last_img), 1)
                 break
-            show(screen("MISSED", RED, "cube not in box" + (" - retrying" if attempt < a.attempts else ""), last_img), 1500)
+            show(screen("MISSED", RED, "not done" + (" - retrying" if attempt < a.attempts else ""), last_img), 1500)
         else:
             say("I could not do it this time")
     cv2.destroyAllWindows()
@@ -204,12 +226,13 @@ def cmd_eval(a):
             continue
         if k != ord(" "):
             continue
-        if run_attempt(cmd, f"Position {pos}", f"{label}  {react}", last_img, setup) == "estop":
+        status, live_ok, proof = run_attempt(cmd, f"Position {pos}", f"{label}  {react}", last_img, setup)
+        if status == "estop":
             log_row(label, policy, react, pos, False, "collision", "emergency stop")
             results.append(False)
             pos += 1
             continue
-        ok, stats, last_img = check_now(setup)
+        ok, stats, last_img = verdict(live_ok, proof, setup)
         failure, notes = "", str(stats)
         if not ok:
             keys = "  ".join(f"{i + 1}={t}" for i, t in enumerate(FAILURE_TYPES))

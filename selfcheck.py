@@ -1,7 +1,10 @@
-"""Deterministic "is the cube in the box?" check from one camera frame. No AI, works offline.
+"""Deterministic "is the object in the target zone?" check from one camera frame. No AI, works offline.
+
+Pen task: the target zone is the AIR above the pick area (as the camera sees it), so "pen in zone for 1 s" = lifted.
+Use a brightly coloured pen (or wrap coloured tape around it): colour detection cannot find a black or white pen.
 
 Setup (once per stage layout, camera must be fixed and taped):
-    .venv\\Scripts\\python selfcheck.py setup     # click 4 box corners, click the cube, press s
+    .venv\\Scripts\\python selfcheck.py setup     # click 4 corners of the target zone, click the pen, press s
     .venv\\Scripts\\python selfcheck.py live      # live view: mask + verdict, to test lighting
 
 The setup is saved to stage_setup.json in the repo. Commit it together with the photos of the tape marks,
@@ -126,7 +129,8 @@ def cmd_setup(a):
     win = "selfcheck setup"
     cv2.namedWindow(win)
     cv2.setMouseCallback(win, on_click)
-    print("Click the 4 inner corners of the box, then click the cube. r = reset, s = save, q = quit.")
+    print("Click 4 corners of the target zone (pen task: the air above the pick area), then click the pen. "
+          "r = reset, s = save, q = quit.")
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -138,14 +142,14 @@ def cmd_setup(a):
         if len(pts) >= 2:
             cv2.polylines(view, [np.array(pts, np.int32)], len(pts) == 4, GREEN, 2)
         if len(pts) == 4 and state["hsv"]:
-            setup = {"box": pts, "hsv_lo": state["hsv"][0], "hsv_hi": state["hsv"][1],
+            setup = {"box": pts, "goal": a.goal, "hold_s": a.hold_s, "hsv_lo": state["hsv"][0], "hsv_hi": state["hsv"][1],
                      "min_pixels": a.min_pixels,
                      "min_fraction": a.min_fraction}
             ok_, stats, view = check(frame, setup)
-            msg = f"IN BOX  {stats}" if ok_ else f"not in box  {stats}"
+            msg = f"IN ZONE  {stats}" if ok_ else f"not in zone  {stats}"
             cv2.putText(view, msg, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, GREEN if ok_ else RED, 2)
         else:
-            step = "click box corner %d/4" % (len(pts) + 1) if len(pts) < 4 else "click the cube"
+            step = "click zone corner %d/4" % (len(pts) + 1) if len(pts) < 4 else "click the pen"
             cv2.putText(view, step, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2)
         cv2.imshow(win, view)
         k = cv2.waitKey(30) & 0xFF
@@ -172,7 +176,7 @@ def cmd_live(a):
         t = time.perf_counter()
         ok_, stats, view = check(frame, setup)
         ms = (time.perf_counter() - t) * 1000
-        cv2.putText(view, f"{'IN BOX' if ok_ else 'not in box'}  {stats}  {ms:.1f} ms", (10, 25),
+        cv2.putText(view, f"{'IN ZONE' if ok_ else 'not in zone'}  {stats}  {ms:.1f} ms", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, GREEN if ok_ else RED, 2)
         cv2.imshow("selfcheck live", view)
         if cv2.waitKey(30) & 0xFF in (ord("q"), 27):
@@ -185,17 +189,19 @@ def cmd_once(a):
     setup = load_setup()
     ok, stats, view = check(grab_frame(), setup)
     cv2.imwrite(str(ROOT / "selfcheck_last.jpg"), view)
-    print(("IN BOX" if ok else "NOT IN BOX"), stats)
+    print(("IN ZONE" if ok else "NOT IN ZONE"), stats)
     sys.exit(0 if ok else 1)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("setup", help="mark the box and sample the cube colour")
+    s = sub.add_parser("setup", help="mark the target zone and sample the object colour")
     s.add_argument("--camera", type=int, help="override the [cameras.front] index from config")
-    s.add_argument("--min-pixels", type=int, default=400, help="cube pixels inside the box that count as success")
-    s.add_argument("--min-fraction", type=float, default=0.8, help="share of the visible cube that must be inside")
+    s.add_argument("--min-pixels", type=int, default=400, help="object pixels inside the zone that count as success")
+    s.add_argument("--goal", default="pen lifted", help="what success is called on screen and in speech")
+    s.add_argument("--hold-s", type=float, default=1.0, help="seconds the object must stay in the zone")
+    s.add_argument("--min-fraction", type=float, default=0.6, help="share of the visible object that must be inside (pen: the gripper hides part of it)")
     s.set_defaults(fn=cmd_setup)
     sub.add_parser("live", help="live view of the check").set_defaults(fn=cmd_live)
     sub.add_parser("once", help="one check, exit code 0 = in box").set_defaults(fn=cmd_once)
