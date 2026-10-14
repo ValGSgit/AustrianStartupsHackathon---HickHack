@@ -1,9 +1,10 @@
 // RobotSession: one Durable Object instance per robot. Holds the laptop agent's WebSocket
 // (hibernation API, so an idle connection costs nothing) and the robot's state.
 //
-// Agent -> DO messages:   hello {skills, mode} | snapshot {id, jpeg} | status {state, detail} | done {skill, ok, detail, jpeg?}
+// Agent -> DO messages:   hello {skills, mode, arm, camera} | snapshot {id, jpeg} | status {state, detail} | done {skill, ok, detail, jpeg?}
+//                         hw {arm, camera}   (device status for the dashboard's status line)
 //                         log {text} | frame {t, jpeg, joints, state, target}   (live view while a skill runs)
-// DO -> agent messages:   snapshot {id} | run {skill} | stop
+// DO -> agent messages:   snapshot {id} | run {skill} | stop | hw {action: camera_on|camera_off|arm_on|arm_off}
 // DO -> viewer messages:  backlog {events, frame} | event {event} | frame {...}   (dashboard Live panel, /api/live)
 
 import { DurableObject } from "cloudflare:workers";
@@ -25,6 +26,11 @@ export interface CommandLog {
   error?: string;
 }
 
+export interface Device {
+  state: string; // on | off | warn | error
+  detail: string;
+}
+
 export interface State {
   agentConnected: boolean;
   mode: string; // "real" | "sim" (reported by the agent)
@@ -36,7 +42,10 @@ export interface State {
   lastResult: { skill: string; ok: boolean; detail: string; verdict: string; at: string } | null;
   hasBefore: boolean;
   hasAfter: boolean;
+  hw: { arm: Device; camera: Device } | null;
 }
+
+const device = (d: any): Device => ({ state: String(d?.state ?? "off"), detail: String(d?.detail ?? "") });
 
 type Pending = { resolve: (jpeg: string | null) => void; timer: ReturnType<typeof setTimeout> };
 
@@ -88,8 +97,15 @@ export class RobotSession extends DurableObject<Env> {
           mode: String(msg.mode ?? "real"),
           status: "idle",
           detail: `agent ready (${msg.mode ?? "real"})`,
+          hw: { arm: device(msg.arm), camera: device(msg.camera) },
         });
         break;
+      case "hw": {
+        const hw = { arm: device(msg.arm), camera: device(msg.camera) };
+        await this.patch({ hw });
+        this.event("conn", `arm: ${hw.arm.state} (${hw.arm.detail}) · camera: ${hw.camera.state} (${hw.camera.detail})`);
+        break;
+      }
       case "snapshot": {
         const p = this.pending.get(msg.id);
         if (p) {
@@ -193,6 +209,13 @@ export class RobotSession extends DurableObject<Env> {
     return !!ws;
   }
 
+  /** Camera preview / read-only arm connection on the laptop (status line buttons). */
+  async hw(action: string): Promise<boolean> {
+    const ws = this.agent();
+    ws?.send(JSON.stringify({ type: "hw", action }));
+    return !!ws;
+  }
+
   async logCommand(entry: CommandLog): Promise<void> {
     await this.ctx.storage.put("lastCommand", entry);
   }
@@ -238,6 +261,7 @@ export class RobotSession extends DurableObject<Env> {
       lastResult: (await this.ctx.storage.get<State["lastResult"]>("lastResult")) ?? null,
       hasBefore: !!(await this.ctx.storage.get("img:before")),
       hasAfter: !!(await this.ctx.storage.get("img:after")),
+      hw: this.agent() ? (base.hw ?? null) : null,
     };
   }
 

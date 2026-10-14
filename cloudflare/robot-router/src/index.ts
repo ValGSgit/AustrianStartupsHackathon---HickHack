@@ -7,6 +7,8 @@
 //   POST /api/command        {text} or {audio: base64 wav}  -> transcribe, look, route, guard, run
 //   POST /api/run            {skill}   run a skill directly (confirm button / bypass when AI is down)
 //   POST /api/stop           stop the running skill
+//   POST /api/hw             {action}  camera_on | camera_off | arm_on | arm_off  (laptop devices, status line)
+//   POST /api/look           one camera frame -> vision model, shown in the Live panel (no skill runs)
 // All /api routes need the shared secret: "Authorization: Bearer <ROBOT_TOKEN>" (agent: ?token=...).
 
 import { describeScene, route, transcribe } from "./ai";
@@ -15,6 +17,7 @@ import { RobotSession, type CommandLog, type Env } from "./session";
 export { RobotSession };
 
 const CONFIDENCE_MIN = 0.6;
+const HW_ACTIONS = ["camera_on", "camera_off", "arm_on", "arm_off"];
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -51,6 +54,14 @@ export default {
 
     if (url.pathname === "/api/stop") return json({ sent: await robot.stop() });
 
+    if (url.pathname === "/api/hw") {
+      const action = String((body as { action?: string }).action ?? "");
+      if (!HW_ACTIONS.includes(action)) return json({ error: `action must be one of ${HW_ACTIONS.join(", ")}` }, 400);
+      return json({ sent: await robot.hw(action) });
+    }
+
+    if (url.pathname === "/api/look") return json(await look(env, robot));
+
     if (url.pathname === "/api/run") {
       if (!body.skill) return json({ error: "skill required" }, 400);
       return json(await robot.run(body.skill));
@@ -61,6 +72,26 @@ export default {
     return json({ error: "not found" }, 404);
   },
 } satisfies ExportedHandler<Env>;
+
+/** Vision showcase: what does the model see right now? Same snapshot + prompt as a real command, no skill runs. */
+async function look(env: Env, robot: DurableObjectStub<RobotSession>): Promise<{ scene: string; ms: number; error?: string }> {
+  const state = await robot.getState();
+  if (!state.agentConnected) return { scene: "", ms: 0, error: "robot agent is not connected" };
+  let t = Date.now();
+  const jpeg = await robot.snapshot(5000);
+  await robot.log("camera", jpeg ? `look: snapshot from the robot camera (${Date.now() - t} ms)` : "look: no camera frame (timeout)");
+  if (!jpeg) return { scene: "", ms: 0, error: "no camera frame" };
+  t = Date.now();
+  try {
+    const scene = await describeScene(env.AI, jpeg, state.mode);
+    const ms = Date.now() - t;
+    await robot.log("vision", `Mistral Small 3.1 sees: ${scene} (${ms} ms)`);
+    return { scene, ms };
+  } catch (e) {
+    await robot.log("error", `vision failed: ${e}`);
+    return { scene: "", ms: 0, error: String(e) };
+  }
+}
 
 async function handleCommand(
   env: Env,

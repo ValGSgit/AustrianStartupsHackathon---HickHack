@@ -19,7 +19,14 @@
   header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
   h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); display: inline-block; }
-  .dot.on { background: var(--ok); } .dot.run { background: var(--accent); }
+  .dot.on { background: var(--ok); } .dot.run, .dot.warn { background: var(--accent); } .dot.off { background: var(--muted); }
+  .hwbar { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; padding: 10px 16px; }
+  .dev { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .dev .what { font-weight: 600; } .dev .detail { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .dev button, .hwbar > button { padding: 6px 11px; font-size: 13px; }
+  .vision { display: grid; grid-template-columns: 112px 1fr; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .vision img { width: 112px; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px; background: var(--chip); display: block; }
+  .vision .vt { font-size: 14px; } .vision .vm { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .status { display: flex; align-items: center; gap: 8px; color: var(--muted); }
   .grow { flex: 1; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
@@ -79,6 +86,15 @@
     <button id="stop" class="stop">STOP</button>
   </header>
 
+  <section class="panel hwbar" aria-label="Devices on the robot laptop">
+    <div class="dev"><span id="armDot" class="dot off"></span><span class="what">Arm</span><span id="armText" class="detail">—</span>
+      <button id="armBtn" disabled>Connect</button></div>
+    <div class="dev"><span id="camDot" class="dot off"></span><span class="what">Camera</span><span id="camText" class="detail">—</span>
+      <button id="camBtn" disabled>Start preview</button></div>
+    <span class="grow"></span>
+    <button id="lookBtn" class="primary" disabled title="Send one camera frame to the vision model">Look (vision AI)</button>
+  </section>
+
   <section id="auth" class="panel hidden">
     <div class="label">Robot token</div>
     <div class="row">
@@ -103,6 +119,11 @@
       <div>
         <div id="joints"></div>
         <div class="legend"><i class="s"></i>current joint position<i class="t"></i>target the policy commands</div>
+        <div class="vision">
+          <img id="visionImg" alt="">
+          <div><div class="label" style="margin:0">Vision model sees</div>
+            <div id="visionText" class="vt">— press Look, or send a command</div><div id="visionMeta" class="vm"></div></div>
+        </div>
       </div>
     </div>
     <div id="log" class="log"></div>
@@ -187,6 +208,7 @@ async function poll() {
     const s = await (await api("/api/state")).json();
     $("dot").className = "dot " + (s.status === "running" ? "run" : s.agentConnected ? "on" : "");
     $("statusText").textContent = s.agentConnected ? `${s.mode} robot · ${s.status}${s.current ? " · " + s.current : ""}` : "robot agent offline";
+    showHw(s);
     $("skills").innerHTML = "";
     for (const k of s.skills) {
       const b = document.createElement("button");
@@ -204,6 +226,39 @@ async function poll() {
 }
 setInterval(poll, 1500); poll();
 
+// --- status line: camera preview + read-only arm connection on the robot laptop
+let hwState = null;
+function showHw(s) {
+  hwState = s.agentConnected ? s.hw : null;
+  const busy = !s.agentConnected || s.status === "running";
+  for (const [key, dot, text, btn, on, off] of [["arm", "armDot", "armText", "armBtn", "Disconnect", "Connect"],
+                                                 ["camera", "camDot", "camText", "camBtn", "Stop preview", "Start preview"]]) {
+    const d = hwState?.[key];
+    $(dot).className = "dot " + (d ? d.state : "off");
+    $(text).textContent = d ? d.detail : (s.agentConnected ? "—" : "robot agent offline");
+    $(btn).textContent = d && d.state !== "off" && d.state !== "error" ? on : off;
+    $(btn).disabled = busy || (key === "arm" && s.mode === "sim");
+  }
+  $("lookBtn").disabled = busy;
+}
+const hwToggle = (key, onAction, offAction) => () => {
+  const d = hwState?.[key], isOn = d && d.state !== "off" && d.state !== "error";
+  api("/api/hw", { action: isOn ? offAction : onAction }).then(() => setTimeout(poll, 400));
+};
+$("armBtn").onclick = hwToggle("arm", "arm_on", "arm_off");
+$("camBtn").onclick = hwToggle("camera", "camera_on", "camera_off");
+$("lookBtn").onclick = async () => {
+  $("visionText").textContent = "Looking…"; $("visionMeta").textContent = "";
+  const r = await (await api("/api/look", {})).json();
+  if (r.error) $("visionText").textContent = "Look failed: " + r.error;
+};
+async function showVision(text) {
+  const m = text.match(/^Mistral Small 3\.1 sees: (.*) \((\d+) ms\)$/s);
+  $("visionText").textContent = m ? m[1] : text;
+  $("visionMeta").textContent = m ? `Mistral Small 3.1 on Workers AI · ${m[2]} ms · ${new Date().toLocaleTimeString([], { hour12: false })}` : "";
+  try { await loadImg("before", $("visionImg")); } catch {}
+}
+
 // --- live view: camera frames + joint state/targets + pipeline log, pushed over a WebSocket by the Durable Object
 const JOINT_LABELS = { shoulder_pan: "shoulder pan", shoulder_lift: "shoulder lift", elbow_flex: "elbow", wrist_flex: "wrist flex",
                        wrist_roll: "wrist roll", gripper: "gripper" };
@@ -215,7 +270,11 @@ function connectLive() {
   live = new WebSocket(`${proto}://${location.host}/api/live?token=${encodeURIComponent(token)}`);
   live.onmessage = (e) => {
     const m = JSON.parse(e.data);
-    if (m.type === "backlog") { $("log").innerHTML = ""; m.events.forEach(addLog); if (m.frame) showFrame(m.frame, false); }
+    if (m.type === "backlog") {
+      $("log").innerHTML = ""; $("log").dataset.backlog = "1"; m.events.forEach(addLog); delete $("log").dataset.backlog;
+      const v = [...m.events].reverse().find((e) => e.kind === "vision"); if (v) showVision(v.text);
+      if (m.frame) showFrame(m.frame, false);
+    }
     else if (m.type === "event") addLog(m.event);
     else if (m.type === "frame") showFrame(m, true);
   };
@@ -233,13 +292,14 @@ function addLog(ev) {
   while (box.children.length > 400) box.removeChild(box.firstChild);
   if (stick) box.scrollTop = box.scrollHeight;
   if (ev.kind === "heard") lastJointLog = -1;
+  if (ev.kind === "vision" && !box.dataset.backlog) showVision(ev.text);
 }
 
 const pos = (name, v) => name === "gripper" ? Math.max(0, Math.min(100, v)) : Math.max(0, Math.min(100, (v + 100) / 2));
 
 function showFrame(f, fresh) {
-  $("liveImg").src = "data:image/jpeg;base64," + f.jpeg;
-  $("liveBadge").textContent = fresh ? `t = ${f.t.toFixed(1)} s` : "last frame";
+  if (f.jpeg) $("liveImg").src = "data:image/jpeg;base64," + f.jpeg;
+  $("liveBadge").textContent = !fresh ? "last frame" : f.label || `t = ${f.t.toFixed(1)} s`;
   const box = $("joints");
   if (box.children.length !== f.joints.length) {
     box.innerHTML = f.joints.map((j) => `<div class="joint" id="j-${j}"><span class="name">${JOINT_LABELS[j] || j}</span>` +
@@ -247,11 +307,13 @@ function showFrame(f, fresh) {
       `<span class="num"></span></div>`).join("");
   }
   f.joints.forEach((j, i) => {
-    const row = $("j-" + j), s = f.state[i], t = f.target ? f.target[i] : null;
-    row.querySelector(".state").style.left = pos(j, s) + "%";
+    const row = $("j-" + j), s = f.state ? f.state[i] : null, t = f.target ? f.target[i] : null;
+    const dot = row.querySelector(".state");
+    dot.style.display = s === null ? "none" : ""; if (s !== null) dot.style.left = pos(j, s) + "%";
     const tgt = row.querySelector(".target");
     tgt.style.display = t === null ? "none" : ""; if (t !== null) tgt.style.left = pos(j, t) + "%";
-    row.querySelector(".num").textContent = t === null ? s.toFixed(0) : `${s.toFixed(0)} → ${t.toFixed(0)}`;
+    const fmt = (v) => v === null ? "–" : v.toFixed(0);
+    row.querySelector(".num").textContent = t === null ? fmt(s) : `${fmt(s)} → ${fmt(t)}`;
   });
   // one transcript line per second of motion: the joint targets the arm is being driven to
   if (fresh && f.target && Math.floor(f.t) !== lastJointLog) {

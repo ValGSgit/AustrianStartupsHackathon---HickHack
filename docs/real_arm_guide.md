@@ -219,10 +219,17 @@ The [robot-router Worker](../cloudflare/robot-router) turns "please grab the pen
    ```powershell
    .venv\Scripts\python host\robot_agent.py --url http://127.0.0.1:8787 --token <ROBOT_TOKEN>
    ```
-4. Open the dashboard and enter the token. Type or say: "please grab the pen", "wave at everyone".
-   The dashboard shows what it heard, what the camera saw, which skill it picked, and before/after images.
+4. Open the dashboard and enter the token. First check the hardware from the **status line** at the top:
+   - **Camera → Start preview**: the Live panel shows the camera. Fix the framing and lighting now.
+   - **Look (vision AI)**: the vision model says what it sees. The pen should be named, with its position.
+   - **Arm → Connect** (read-only, torque untouched): the bars show the follower's joints. Rest pose ≈
+     `[0,-99,99,74,*,2]`. If torque is off (e.g. right after calibrating), move it gently by hand and the bars
+     must follow in the same directions as in step 4. If a joint resists, torque is on: don't force it.
+5. Type or say: "please grab the pen", "wave at everyone". The Live panel shows each step (heard → vision →
+   router → inference → joint targets) while the arm moves, then the result and the vision check.
 
-- The camera is only used for one snapshot before each skill, and LeRobot holds it during a rollout.
+- Only one program can hold the camera or the COM port. Stop teleop/record before using the status line;
+  the agent releases both by itself before a skill runs and reopens them afterwards.
 - **STOP** in the dashboard ends the running skill. The power plug is still the real e-stop.
 - No arm yet? Add `--sim` to `robot_agent.py` and the MuJoCo sim stands in for the arm.
 

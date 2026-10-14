@@ -18,10 +18,18 @@ browser dashboard ──/api/command──► Worker ──► Workers AI: Whisp
 * The policy runs on the laptop; Cloudflare gets **one snapshot per command** (scene check) and one after the
   skill (vision "did it work?" check).
 * **Live panel** (dashboard WebSocket `/api/live`): every pipeline stage is logged as it happens (heard →
-  camera → vision → router → guardrail → run → policy inference → result → vision check). While a sim skill
-  runs, the agent also streams ~8 Hz 320×240 frames with the 6 joint positions and the targets the policy
-  commands, which the dashboard draws as bars. On the real arm only the log streams for now (lerobot holds the
-  camera during a rollout). The log lives in the Durable Object's memory, so it starts empty after it hibernates.
+  camera → vision → router → guardrail → run → policy inference → result → vision check). While a skill runs
+  (sim or real), the agent also streams ~8 Hz 320×240 frames with the 6 joint positions and the targets the
+  policy commands, which the dashboard draws as bars. The log lives in the Durable Object's memory, so it starts
+  empty after it hibernates.
+* **Status line** (top of the dashboard, `POST /api/hw`): the arm and camera on the robot laptop, each with a
+  button. *Camera → Start preview* streams ~4 fps to the Live panel (off again after 10 min). *Arm → Connect*
+  opens the follower's COM port **read-only**: it reads joint positions for the bars and never changes torque, so
+  the arm neither drops nor moves. Use it after calibration to check the joint directions by hand. *Look (vision
+  AI)* (`POST /api/look`) sends one frame to the vision model and shows what it sees, without running a skill.
+  Before a skill runs, the agent releases the camera and the COM port (lerobot needs both) and reopens them after.
+  During a real rollout/replay `host/live_hook.py` mirrors lerobot's own camera frames, joint positions and
+  targets to the Live panel.
 * Every `/api` route needs the shared secret `ROBOT_TOKEN` (`Authorization: Bearer …`, agent and live view: `?token=`).
 
 ## Models

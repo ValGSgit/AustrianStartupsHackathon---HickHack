@@ -35,6 +35,9 @@ def run(tool: str, *args: str) -> None:
     if tool == "lerobot-train":
         # Windows-safe wrapper: replaces the `checkpoints/last` symlink (needs admin) with a junction.
         cmd = [sys.executable, str(ROOT / "train_win.py"), *args]
+    elif os.environ.get("ROBOT_LIVE") == "1" and tool in ("lerobot-rollout", "lerobot-replay"):
+        # host/robot_agent.py: same tool, but the follower's camera/joints/targets are mirrored for the dashboard
+        cmd = [sys.executable, str(ROOT / "host" / "live_hook.py"), tool, *args]
     else:
         exe = SCRIPTS / f"{tool}.exe"
         cmd = [str(exe if exe.exists() else tool), *args]
