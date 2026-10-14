@@ -93,6 +93,21 @@ Use the same camera, the same position and the same lighting as when you recorde
 
 **Stage fallback:** `robot.py replay --episode N` replays a good recorded demo exactly.
 
+## 6. Stage demo, self-check and evaluation
+
+See [docs/stage_demo.md](docs/stage_demo.md): the disturbance-recovery demo, the recording protocol for it,
+and the tools that wrap rollout:
+
+```powershell
+.venv\Scripts\python selfcheck.py setup            # mark the box + cube colour once the camera is taped
+.venv\Scripts\python stage.py eval --label 10k --policy <checkpoint>   # 20-position protocol -> evals/eval_log.csv
+.venv\Scripts\python stage.py report               # success rate per checkpoint and reactivity setting
+.venv\Scripts\python stage.py demo --fullscreen    # attempt -> camera check -> retry, big status screen
+```
+
+**Per-laptop settings:** copy `config.local.example.toml` to `config.local.toml` (gitignored). It overrides
+`config.toml`, so COM ports, camera index and GPU settings differ per laptop without merge conflicts.
+
 ## GPU benchmark
 
 Measured on 2026-10-14 on a GTX 1650 (4 GB), training ACT on `lerobot/svla_so101_pickplace`
