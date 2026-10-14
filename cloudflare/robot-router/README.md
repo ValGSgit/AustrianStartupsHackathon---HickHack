@@ -56,6 +56,11 @@ Skills come from `config.toml` `[skills.*]` on the laptop. The agent sends `name
 connects, so adding a skill needs no redeploy. Write the description the way you'd explain the skill to a person.
 The router reads only that description.
 
+`molmo_pick` (MolmoAct2) runs on the Mac that has `so101-hackathon/`: the agent starts its `do_task.py "<task>"`
+as a subprocess, STOP sends it Ctrl+C (it eases the arm home), and the result is its `RESULT:` line. Set
+`[molmo] dir` in that laptop's `config.local.toml` (see `config.local.example.toml`). Note: `do_task.py` writes
+Arman's calibration into the motors; run `robot.py restore-calibration` before the team's ACT skills again.
+
 ## Run locally
 
 ```powershell

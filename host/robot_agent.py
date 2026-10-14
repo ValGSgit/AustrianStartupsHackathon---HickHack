@@ -3,7 +3,7 @@
 It opens an OUTBOUND WebSocket to the Worker (works behind venue Wi-Fi, no open ports), announces the
 skills from config.toml [skills.*], and then:
   snapshot -> sends one JPEG from the same camera the policy uses
-  run      -> runs the skill (real: robot.py rollout / replay, sim: policy or motion in MuJoCo)
+  run      -> runs the skill (real: robot.py rollout / replay or MolmoAct2's do_task.py, sim: policy or motion in MuJoCo)
   stop     -> stops the running skill
 and reports status + an after-snapshot when a skill finishes. While a skill runs it streams what the
 dashboard's Live panel shows: `log` lines (inference, phases) and, in the sim, ~8 Hz `frame`s (camera JPEG +
@@ -20,6 +20,7 @@ import json
 import math
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -34,7 +35,17 @@ sys.path.insert(0, str(ROOT))
 from robot import load_config  # noqa: E402 - config.toml + this laptop's config.local.toml (ports, camera index)
 
 CONFIG = load_config()
-SKILLS = CONFIG.get("skills", {})
+# enabled = false (in config.local.toml) hides a skill this laptop can't run, e.g. pick_pen on the MolmoAct2 Mac
+SKILLS = {n: s for n, s in CONFIG.get("skills", {}).items() if s.get("enabled", True)}
+MOLMO = CONFIG.get("molmo", {})
+MOLMO_STOP_GRACE_S = 30  # after STOP, do_task.py gets this long to bring the arm home before it is killed
+
+
+def molmo_dir() -> Path | None:
+    """MolmoAct2 runs from Arman's so101-hackathon folder (own venv, calibration, settings.env, Lightning GPU).
+    Only a laptop whose config.local.toml points [molmo] dir at it announces molmo skills."""
+    d = Path(MOLMO["dir"]).expanduser() if MOLMO.get("dir") else None
+    return d if d and (d / "do_task.py").exists() else None
 
 
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
@@ -199,7 +210,8 @@ class RealBackend(Backend):
 
     def __init__(self, send):
         self.proc: subprocess.Popen | None = None
-        self.cam = next(iter(CONFIG.get("cameras", {}).values()), {"index": 0, "width": 640, "height": 480})
+        self.proc_is_molmo = False
+        self.cam =next(iter(CONFIG.get("cameras", {}).values()), {"index": 0, "width": 640, "height": 480})
         self.reader: CameraReader | None = None
         self.bus = None  # lerobot FeetechMotorsBus while the arm is connected
         self.calibrated = False
@@ -210,7 +222,7 @@ class RealBackend(Backend):
 
     def skills(self):
         return [skill_info(n, s) for n, s in SKILLS.items()
-                if "policy" in s or "replay_dataset" in s]
+                if "policy" in s or "replay_dataset" in s or (s.get("molmo") and molmo_dir())]
 
     # ---- devices
 
@@ -318,7 +330,19 @@ class RealBackend(Backend):
     def run(self, skill, task=""):
         s = SKILLS[skill]
         py = [sys.executable, str(ROOT / "robot.py")]
-        if "policy" in s:
+        cwd, env = ROOT, {}
+        if s.get("molmo"):
+            # MolmoAct2 (zero-shot VLA on a Lightning GPU): do_task.py checks the Studio, robot and cameras, runs the
+            # model, and brings the arm home. A subprocess, not an import: own venv, own calibration, settings.env.
+            d = molmo_dir()
+            if d is None:
+                return False, "[molmo] dir in config.local.toml must point at so101-hackathon (with do_task.py)"
+            cmd = [str(Path(MOLMO.get("python") or d / ".venv/bin/python").expanduser()), str(d / "do_task.py"),
+                   "--seconds", str(s.get("duration_s", 60))]
+            if task and s.get("instruction"):
+                cmd.append(task)  # empty: do_task.py uses MOLMO_TASK from its settings.env
+            cwd, env = d, {"PYTHONUNBUFFERED": "1"}
+        elif "policy" in s:
             cmd = py + ["rollout", "--policy", s["policy"], "--duration", str(s.get("duration_s", 25))]
             if task and s.get("instruction"):
                 cmd += ["--task", task]
@@ -334,14 +358,18 @@ class RealBackend(Backend):
         print(">", " ".join(cmd), flush=True)
         self.log("run: " + " ".join(cmd[1:]))
         # stdin closed: a lerobot input() prompt (e.g. calibration mismatch) fails in the log instead of hanging
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        self.proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace",
-                                     env={**os.environ, "PYTHONUTF8": "1", "ROBOT_LIVE": "1"})
+                                     env={**os.environ, "PYTHONUTF8": "1", "ROBOT_LIVE": "1", **env})
+        self.proc_is_molmo = bool(s.get("molmo"))
         t0, last = time.perf_counter(), 0.0
         self.live_jpeg = None
+        result = ""  # do_task.py's "RESULT: ..." line (it exits 0 whether or not the grab worked)
         for line in self.proc.stdout:
             line = line.strip()
+            if line.startswith("RESULT:"):
+                result = line[7:].strip()
             if line.startswith("@@LIVE "):  # camera + joints + targets from inside lerobot (host/live_hook.py)
                 try:
                     m = json.loads(line[7:])
@@ -349,7 +377,8 @@ class RealBackend(Backend):
                     continue
                 self.live_jpeg = m.get("jpeg") or self.live_jpeg
                 self.send({"type": "frame", "t": round(time.perf_counter() - t0, 2), "joints": JOINTS, **m})
-            elif line and (time.perf_counter() - last > 0.5 or "error" in line.lower()):
+            elif line and (time.perf_counter() - last > 0.5 or "error" in line.lower()
+                           or line.startswith(("FAIL", "->", "RESULT:"))):  # do_task.py's failures + fixes, result
                 last = time.perf_counter()  # lerobot's own log, rate-limited so progress bars don't flood the socket
                 self.log(line[:300])
         code = self.proc.wait()
@@ -363,12 +392,21 @@ class RealBackend(Backend):
         self.report_hw()
         if self.stop_flag.is_set():
             return False, "stopped"
+        if s.get("molmo") and code == 0:
+            return result.startswith("success"), result or f"{skill} finished (exit 0, no RESULT line)"
         return code == 0, f"{skill} finished (exit {code})"
 
     def on_stop(self):
         # e-stop is still the follower's power plug
         if self.proc and self.proc.poll() is None:
-            if sys.platform == "win32":
+            if self.proc_is_molmo:
+                # do_task.py treats Ctrl+C as "stop, ease to home, motors off"; SIGTERM would skip that
+                proc = self.proc
+                proc.send_signal(signal.SIGINT)
+                kill = threading.Timer(MOLMO_STOP_GRACE_S, lambda: proc.poll() is None and proc.terminate())
+                kill.daemon = True
+                kill.start()
+            elif sys.platform == "win32":
                 # robot.py runs lerobot-rollout as ITS child; terminate() would kill only robot.py and the arm keeps going
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True)
             else:

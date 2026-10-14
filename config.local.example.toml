@@ -10,6 +10,15 @@
 # [cameras.front]
 # index = 1
 
+# MolmoAct2 laptop (Arman's Mac): announce molmo_pick, hide the skills this laptop can't run.
+# Only one robot agent can be connected to the Worker at a time.
+# [molmo]
+# dir = "~/Documents/workplace/so101-hackathon"
+# [skills.pick_pen]
+# enabled = false
+# [skills.wave]
+# enabled = false
+
 # RTX 3060 Laptop (6 GB), measured 2026-10-14 on lerobot/svla_so101_pickplace (2 cameras, ACT, 200 steps):
 #   batch 8,  AMP off: 0.30 s/step, 3.7 GB
 #   batch 8,  AMP on:  0.26 s/step, 3.6 GB   <- 2 cameras: use this
