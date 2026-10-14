@@ -51,6 +51,31 @@ def mask(frame: np.ndarray, hsv) -> np.ndarray:
     return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
 
+def is_white(setup: dict) -> bool:
+    """Cup colour sampled as white/grey (any hue, low saturation): find cups by brightness instead of colour."""
+    lo, hi = setup["cup_hsv"]
+    return lo[1] == 0 and hi[1] <= 110
+
+
+def cup_mask(frame: np.ndarray, setup: dict) -> np.ndarray:
+    """Cup pixels. White cups on the dark board: everything clearly brighter than the board, inside the board.
+    The threshold adapts to each frame (Otsu), so auto exposure and lamp changes don't break it."""
+    if not is_white(setup):
+        return mask(frame, setup["cup_hsv"])
+    v = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[:, :, 2]
+    hull = board_hull(frame)
+    inside = np.zeros(v.shape, np.uint8)
+    if hull is not None:
+        cv2.drawContours(inside, [hull], -1, 255, -1)
+    else:
+        inside[:] = 255
+    vals = v[inside > 0]
+    otsu, _ = cv2.threshold(vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    m = ((v > max(otsu, np.median(vals) + 30)) & (inside > 0)).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+
+
 def scaled(frame: np.ndarray, setup: dict) -> tuple[list[tuple[float, float, float]], float]:
     """Slots in this frame's pixels (setup may come from a different resolution) + pixel-area scale."""
     h, w = frame.shape[:2]
@@ -66,13 +91,13 @@ def disc(shape, x, y, r) -> np.ndarray:
 
 
 def slot_states(frame: np.ndarray, setup: dict) -> list[dict]:
-    cup = mask(frame, setup["cup_hsv"])
+    cup = cup_mask(frame, setup)
     slots, area = scaled(frame, setup)
     out = []
     for x, y, r in slots:
         m = cup & disc(frame.shape, x, y, SEARCH * r)
         px = int(cv2.countNonZero(m))
-        occ = px >= setup.get("min_cup_px", 400) * area
+        occ = px >= min(setup.get("min_cup_px", 400) * area, 0.25 * np.pi * (SEARCH * r) ** 2)
         dx = dy = 0
         if occ:
             mo = cv2.moments(m, binaryImage=True)
@@ -90,7 +115,8 @@ def ball_visible(frame: np.ndarray, setup: dict, slot: int | None = None) -> tup
         x, y, r = slots[slot - 1]
         m &= disc(frame.shape, x, y, BALL_NEAR * r)
     px = int(cv2.countNonZero(m))
-    ok = px >= setup.get("min_ball_px", 80) * area
+    # a ball is small: a huge "ball" area means the colour also matches the board/table (no real ball sampled)
+    ok = setup.get("min_ball_px", 80) * area <= px <= setup.get("max_ball_px", 3000) * area
     pos = None
     if px:
         mo = cv2.moments(m, binaryImage=True)
@@ -144,8 +170,9 @@ def board_hull(frame: np.ndarray, min_frac: float = 0.08):
     i = 1 + int(np.argmax(stats[1:, 4]))
     if stats[i][4] < min_frac * frame.shape[0] * frame.shape[1]:
         return None
-    pts = cv2.findNonZero((labels == i).astype(np.uint8))
-    return cv2.convexHull(pts)
+    # outer outline of the board, holes (= cups on it) filled; notches where the table shows stay outside
+    contours, _ = cv2.findContours((labels == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return max(contours, key=cv2.contourArea)
 
 
 def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
@@ -154,7 +181,7 @@ def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
     if not setup.get("cup_hsv"):
         raise ValueError("vision setup has no cup_hsv. Run: .venv\\Scripts\\python shellgame\\vision.py setup")
     _, area = scaled(frame, {**setup, "slots": []})
-    n, _, stats, cents = cv2.connectedComponentsWithStats(mask(frame, setup["cup_hsv"]))
+    n, _, stats, cents = cv2.connectedComponentsWithStats(cup_mask(frame, setup))
     cups = [{"uv": (float(cents[i][0]), float(cents[i][1])), "px": int(stats[i][4]),
              "bbox": tuple(int(x) for x in stats[i][:4])}
             for i in range(1, n) if setup.get("min_cup_px", 400) * area <= stats[i][4] <= setup.get("max_cup_px", 15000) * area]

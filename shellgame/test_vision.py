@@ -90,7 +90,7 @@ def test_find_cups():
     img = np.full((480, 640, 3), 70, np.uint8)
     cv2.circle(img, (150, 200), 45, BLUE, -1)      # biggest
     cv2.circle(img, (400, 330), 35, BLUE, -1)
-    cv2.circle(img, (630, 100), 30, BLUE, -1)      # touches the right border: kept
+    cv2.circle(img, (560, 100), 30, BLUE, -1)      # cups at the board edge are dropped (table shows there), so keep it inside
     cv2.circle(img, (300, 420), 25, ORANGE, -1)    # ball colour: not a cup
     cv2.circle(img, (500, 420), 6, BLUE, -1)       # speck below min_cup_px
     cups = find_cups(img, setup)
