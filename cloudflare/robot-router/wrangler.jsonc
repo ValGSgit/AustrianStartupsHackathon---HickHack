@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "robot-router",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-25",
+  "observability": { "enabled": true },
+
+  // Dashboard (public/) is served as static assets; everything under /api/* falls through to the Worker.
+  "assets": { "directory": "./public" },
+
+  // Workers AI: speech-to-text, vision, and the instruction router.
+  "ai": { "binding": "AI" },
+
+  // One Durable Object instance = the robot's "session": the laptop agent's WebSocket + current state.
+  "durable_objects": {
+    "bindings": [{ "name": "ROBOT", "class_name": "RobotSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RobotSession"] }]
+
+  // Secret (not in this file): ROBOT_TOKEN - shared by the dashboard and the laptop agent.
+  //   npx wrangler secret put ROBOT_TOKEN        (production)
+  //   .dev.vars: ROBOT_TOKEN=...                  (wrangler dev)
+}

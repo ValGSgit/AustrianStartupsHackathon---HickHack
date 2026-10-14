@@ -63,9 +63,11 @@ def run(tool: str, *args: str) -> None:
     sys.exit(subprocess.call(cmd, env=env))
 
 
-def hf_repo(name: str) -> str:
+def hf_repo(name: str, local_ok: bool = False) -> str:
     user = CONFIG["hf"]["user"]
     if user == "CHANGE_ME":
+        if local_ok:  # local-only data (e.g. sim datasets with --no-push) doesn't need a Hub account
+            return f"local/{name}"
         sys.exit("Set [hf] user in config.toml first (your Hugging Face username).")
     return f"{user}/{name}"
 
@@ -143,6 +145,41 @@ def cmd_setup_motors(a):
         run("lerobot-setup-motors", f"--teleop.type={l['type']}", f"--teleop.port={l['port']}")
 
 
+def cmd_positions(a):
+    """Print joint values in LeRobot units - the same numbers datasets store and policies output."""
+    import time
+
+    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+    l, f = CONFIG["leader"], CONFIG["follower"]
+    devices = [("leader", SO101Leader(SO101LeaderConfig(port=l["port"], id=l["id"], calibration_dir=CALIB_DIR)))]
+    if a.follower:
+        from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+
+        # keep torque on when we disconnect, so the follower holds its pose instead of dropping
+        devices.append(("follower", SO101Follower(SO101FollowerConfig(
+            port=f["port"], id=f["id"], calibration_dir=CALIB_DIR, disable_torque_on_disconnect=False))))
+    for label, d in devices:
+        d.connect(calibrate=False)
+        if not d.is_calibrated:
+            sys.exit(f"{label} is not calibrated (no calibration/{CONFIG[label]['id']}.json) - run: robot.py calibrate {label}")
+    names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    print("            " + " ".join(f"{n[:12]:>13}" for n in names))
+    try:
+        while True:
+            for label, d in devices:
+                vals = d.get_action() if label == "leader" else d.get_observation()
+                print(f"{label:>10}: " + " ".join(f"{vals[n + '.pos']:13.1f}" for n in names), flush=True)
+            if not a.watch:
+                break
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for _, d in devices:
+            d.disconnect()
+
+
 def cmd_calibrate(a):
     if a.arm == "follower":
         run("lerobot-calibrate", *robot_args(with_cameras=False))
@@ -172,7 +209,7 @@ def cmd_record(a):
         "lerobot-record",
         *robot_args(),
         *teleop_args(),
-        f"--dataset.repo_id={hf_repo(name)}",
+        f"--dataset.repo_id={hf_repo(name, local_ok=a.no_push)}",
         f"--dataset.root={root}",
         f"--dataset.num_episodes={a.episodes}",
         f"--dataset.single_task={t['description']}",
@@ -191,7 +228,7 @@ def cmd_replay(a):
     run(
         "lerobot-replay",
         *robot_args(with_cameras=False),
-        f"--dataset.repo_id={hf_repo(name)}",
+        f"--dataset.repo_id={hf_repo(name, local_ok=True)}",
         f"--dataset.root={dataset_root(name)}",
         f"--dataset.episode={a.episode}",
     )
@@ -213,12 +250,12 @@ def cmd_train(a):
         sys.exit(f"{out} already exists. Use --resume to continue it, or pick another --policy name.")
     run(
         "lerobot-train",
-        f"--dataset.repo_id={hf_repo(dataset)}",
+        f"--dataset.repo_id={hf_repo(dataset, local_ok=a.no_push)}",
         f"--dataset.root={dataset_root(dataset)}",
         "--policy.type=act",
         "--policy.device=cuda",
         f"--policy.use_amp={str(tr['use_amp']).lower()}",
-        f"--policy.repo_id={hf_repo(policy)}",
+        f"--policy.repo_id={hf_repo(policy, local_ok=a.no_push)}",
         f"--policy.push_to_hub={str(not a.no_push).lower()}",
         "--policy.private=true",
         f"--steps={a.steps or tr['steps']}",
@@ -250,6 +287,7 @@ def cmd_rollout(a):
         f"--task={CONFIG['task']['description']}",
         f"--duration={a.duration}",
         f"--display_data={str(a.display).lower()}",
+        *([f"--robot.max_relative_target={float(a.max_step)}"] if a.max_step else []),
     )
 
 
@@ -272,6 +310,11 @@ def main():
     s = sub.add_parser("calibrate", help="calibrate an arm (once per arm, per laptop)")
     s.add_argument("arm", choices=["follower", "leader"])
     s.set_defaults(fn=cmd_calibrate)
+
+    s = sub.add_parser("positions", help="print joint values in LeRobot units (check calibration / directions)")
+    s.add_argument("--follower", action="store_true", help="also read the follower (it keeps holding its pose)")
+    s.add_argument("--watch", action="store_true", help="keep printing 4x per second until Ctrl-C")
+    s.set_defaults(fn=cmd_positions)
 
     s = sub.add_parser("teleop", help="drive the follower with the leader arm")
     s.add_argument("--no-cameras", action="store_true", help="skip cameras and the rerun viewer")
@@ -304,6 +347,9 @@ def main():
     s.add_argument("--policy", help="policy name, local checkpoint folder, or Hub repo id")
     s.add_argument("--duration", type=int, default=60, help="seconds to run")
     s.add_argument("--display", action="store_true", help="show cameras in rerun (costs some fps)")
+    s.add_argument("--max-step", type=float, metavar="N",
+                   help="safety: cap each joint's move per 30 Hz step to N position units (-100..100 scale); "
+                        "2 = ~60 units/s, good for a first supervised rollout")
     s.set_defaults(fn=cmd_rollout)
 
     a = p.parse_args()

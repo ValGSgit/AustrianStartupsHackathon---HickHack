@@ -1,0 +1,16 @@
+services:
+  sim:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sim
+    image: hickhack/so101-sim:latest
+    ports:
+      - "8765:8765"       # Foxglove bridge -> Foxglove Studio: ws://localhost:8765
+      - "5005:5005/udp"   # leader arm packets from host/leader_to_sim.py
+    volumes:
+      - ./data:/ws/data          # datasets (shared with the host's robot.py train)
+      - ./outputs:/ws/outputs    # trained policies, eval videos
+    environment:
+      - ROS_DOMAIN_ID=42
+    # default command: scripted expert demo; override, e.g.
+    #   docker compose run --rm --service-ports sim ros2 launch so101_sim_ros sim.launch.py mode:=teleop

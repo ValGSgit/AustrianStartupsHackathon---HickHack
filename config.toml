@@ -56,3 +56,25 @@ duration_s = 25                       # one attempt: reach, grasp, place, return
 attempts = 3                          # retries after a self-check miss
 n_action_steps = 20                   # ACT default 100 = 3.3 s blind; 20 = re-plan every 0.67 s
 temporal_ensemble_coeff = 0.0         # 0.01 = re-plan every step + blend (ACT paper); overrides n_action_steps
+
+# ---------------------------------------------------------------------------------------------
+# Skills the Cloudflare router may choose from (host/robot_agent.py sends name + description).
+# The LLM picks ONLY from this list - write descriptions as if explaining the skill to a person.
+#   policy / duration_s     -> real arm: robot.py rollout --policy <policy>
+#   replay_*                -> real arm: robot.py replay (exact recorded movement)
+#   sim_policy / sim_motion -> used when the agent runs with --sim
+[skills.pick_pen]
+description = "Picks up the pen lying on the table and lifts it up."
+policy = "act_pick_pen"
+duration_s = 25
+sim_policy = "outputs/train/act_sim_pick_pen/checkpoints/last/pretrained_model"
+
+[skills.wave]
+description = "Waves hello at the audience."
+replay_dataset = "moves_wave"
+replay_episode = 0
+sim_motion = "wave"
+
+[skills.reset_scene]
+description = "Simulation only: puts a new pen on the table at a random spot."
+sim_motion = "reset"
