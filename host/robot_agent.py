@@ -24,14 +24,16 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
+sys.path.insert(0, str(ROOT))
+from robot import load_config  # noqa: E402 - config.toml + this laptop's config.local.toml (ports, camera index)
+
+CONFIG = load_config()
 SKILLS = CONFIG.get("skills", {})
 
 
