@@ -109,12 +109,16 @@ async function api(path, body) {
   const r = await fetch(path, body === undefined
     ? { headers: { Authorization: "Bearer " + token } }
     : { method: "POST", headers: { Authorization: "Bearer " + token, "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (r.status === 401) { $("auth").classList.remove("hidden"); throw new Error("unauthorized"); }
+  if (r.status === 401) { $("auth").classList.remove("hidden"); throw new Error(token ? "wrong token - paste it again and click Unlock" : "enter the robot token below"); }
   return r;
 }
 
 $("saveToken").onclick = () => { token = $("token").value.trim(); try { localStorage.setItem("robotToken", token); } catch {} $("auth").classList.add("hidden"); poll(); };
-$("stop").onclick = () => api("/api/stop", {});
+$("token").onkeydown = (e) => { if (e.key === "Enter") $("saveToken").click(); };
+$("stop").onclick = async () => {
+  try { const s = await (await api("/api/stop", {})).json(); $("statusText").textContent = s.sent ? "stop sent" : "stop: no robot agent connected"; }
+  catch (e) { $("statusText").textContent = String(e.message || e); }
+};
 $("confirm").onclick = async () => { if (pendingConfirm) await api("/api/run", { skill: pendingConfirm }); $("confirmRow").classList.add("hidden"); };
 
 async function send(payload) {
@@ -144,7 +148,7 @@ async function loadImg(kind, el) {
 }
 
 async function poll() {
-  if (!token) { $("auth").classList.remove("hidden"); return; }
+  if (!token) { $("auth").classList.remove("hidden"); $("statusText").textContent = "enter the robot token below"; return; }
   try {
     const s = await (await api("/api/state")).json();
     $("dot").className = "dot " + (s.status === "running" ? "run" : s.agentConnected ? "on" : "");
