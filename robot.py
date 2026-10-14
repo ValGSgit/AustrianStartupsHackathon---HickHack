@@ -18,7 +18,24 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CONFIG = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
+
+
+def _merge(base: dict, over: dict) -> dict:
+    for k, v in over.items():
+        base[k] = _merge(base.get(k, {}), v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
+    return base
+
+
+def load_config() -> dict:
+    # config.local.toml (gitignored) overrides config.toml per laptop: COM ports, camera index, GPU settings.
+    cfg = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
+    local = ROOT / "config.local.toml"
+    if local.exists():
+        _merge(cfg, tomllib.loads(local.read_text(encoding="utf-8")))
+    return cfg
+
+
+CONFIG = load_config()
 SCRIPTS = Path(sys.executable).parent  # .venv/Scripts holds the lerobot-*.exe entry points
 DATA_DIR = ROOT / "data"
 # Calibration lives in the repo (calibration/<id>.json), not in each laptop's HF cache,

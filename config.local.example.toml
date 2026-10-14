@@ -1,0 +1,17 @@
+# Copy to config.local.toml (gitignored) and keep only what differs on YOUR laptop.
+# Values here override config.toml, so teammates never fight over ports or GPU settings.
+
+# [follower]
+# port = "COM5"
+
+# [leader]
+# port = "COM6"
+
+# [cameras.front]
+# index = 1
+
+# RTX 3060 Laptop (6 GB, tensor cores): AMP is fast here, unlike the GTX 1650.
+# Benchmark before trusting batch_size: watch updt_s and mem_gb in the training log.
+# [train]
+# use_amp = true
+# batch_size = 16
