@@ -286,7 +286,7 @@ class RealBackend(Backend):
 
     def snapshot(self):
         if self.reader and self.reader.frame is not None:
-            return jpeg_b64(self.reader.rgb())
+            return self._checked(self.reader.rgb())
         # camera not switched on: open it just for this frame (only while no skill runs - lerobot holds it then)
         cap = cv2.VideoCapture(self.cam["index"], cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam["width"])
@@ -296,7 +296,14 @@ class RealBackend(Backend):
             ok, f = cap.read()
             frame = f if ok else frame
         cap.release()
-        return jpeg_b64(frame[:, :, ::-1]) if frame is not None else None
+        return self._checked(frame[:, :, ::-1]) if frame is not None else None
+
+    def _checked(self, rgb: np.ndarray) -> str | None:
+        """No frame is better than a blank one: the vision model happily 'sees' things in a black image."""
+        if float(rgb.std()) < 6:
+            self.log(f"camera {self.cam['index']} gives a blank image (lens covered, or wrong index in config) - not sent")
+            return None
+        return jpeg_b64(rgb)
 
     def busy_snapshot(self):
         return self.live_jpeg
@@ -524,9 +531,14 @@ async def main_async(a) -> None:
                         backend.submit(msg)
                 finally:
                     pump_task.cancel()
+            reason = ws.close_reason or ""
+            if "replaced" in reason:  # another laptop connected as the robot: don't fight over the connection
+                print(f"disconnected: {reason}. Only one robot agent can be connected - exiting.", flush=True)
+                return
+            print(f"connection closed ({ws.close_code} {reason}) - reconnecting in 3 s", flush=True)
         except Exception as e:
             print(f"connection lost ({e.__class__.__name__}: {e}) - retrying in 3 s", flush=True)
-            await asyncio.sleep(3)
+        await asyncio.sleep(3)
 
 
 def main() -> None:

@@ -64,7 +64,15 @@ export default {
 
     if (url.pathname === "/api/run") {
       if (!body.skill) return json({ error: "skill required" }, 400);
-      return json(await robot.run(body.skill, body.task ?? ""));
+      const r = await robot.run(body.skill, body.task ?? "");
+      // a button press is a command too, so "Last command" and the result always describe the same run
+      await robot.logCommand({
+        at: new Date().toISOString(), source: "button", transcript: "", scene: "",
+        decision: { policy: body.skill, confidence: 1, say: `Running ${body.skill}.`, task: body.task ?? "" },
+        action: r.ok ? "started" : r.reason.startsWith("busy") ? "busy" : "error",
+        ...(r.ok ? {} : { error: r.reason }),
+      });
+      return json(r);
     }
 
     if (url.pathname === "/api/command") return json(await handleCommand(env, robot, body));
@@ -77,9 +85,13 @@ export default {
 async function look(env: Env, robot: DurableObjectStub<RobotSession>): Promise<{ scene: string; ms: number; error?: string }> {
   const state = await robot.getState();
   if (!state.agentConnected) return { scene: "", ms: 0, error: "robot agent is not connected" };
+  if (!(await robot.allowAi())) {
+    await robot.log("error", "too many AI requests this minute - wait a moment");
+    return { scene: "", ms: 0, error: "rate limited, try again in a minute" };
+  }
   let t = Date.now();
   const jpeg = await robot.snapshot(5000);
-  await robot.log("camera", jpeg ? `look: snapshot from the robot camera (${Date.now() - t} ms)` : "look: no camera frame (timeout)");
+  await robot.log("camera", jpeg ? `look: snapshot from the robot camera (${Date.now() - t} ms)` : "look: no usable camera frame");
   if (!jpeg) return { scene: "", ms: 0, error: "no camera frame" };
   t = Date.now();
   try {
@@ -98,7 +110,9 @@ async function handleCommand(
   robot: DurableObjectStub<RobotSession>,
   body: { text?: string; audio?: string },
 ): Promise<CommandLog & { snapshot: boolean }> {
-  const log: CommandLog = { at: new Date().toISOString(), transcript: "", scene: "", decision: null, action: "error" };
+  const log: CommandLog = {
+    at: new Date().toISOString(), source: body.audio ? "voice" : "text", transcript: "", scene: "", decision: null, action: "error",
+  };
   let snapshot = false;
   const since = (t: number) => `${Date.now() - t} ms`;
   try {
@@ -118,14 +132,16 @@ async function handleCommand(
     if (!state.agentConnected) {
       log.action = "no_agent";
       await robot.log("error", "no robot agent connected - nothing to run");
+      await robot.logCommand(log);
       return { ...log, snapshot };
     }
+    if (!(await robot.allowAi())) throw new Error("too many AI requests this minute - wait a moment");
 
     // 2. what the camera sees (one frame, same camera the policy uses)
     t = Date.now();
     const jpeg = await robot.snapshot(5000);
     snapshot = !!jpeg;
-    await robot.log("camera", jpeg ? `snapshot from the robot camera (${since(t)})` : "no camera frame (timeout)");
+    await robot.log("camera", jpeg ? `snapshot from the robot camera (${since(t)})` : "no usable camera frame - routing without a scene");
     if (jpeg) {
       t = Date.now();
       log.scene = await describeScene(env.AI, jpeg, state.mode).catch((e) => `(vision failed: ${e})`);

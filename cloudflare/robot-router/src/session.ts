@@ -19,6 +19,7 @@ export interface Env {
 
 export interface CommandLog {
   at: string;
+  source?: "voice" | "text" | "button"; // button = skill run directly from the dashboard, no AI
   transcript: string;
   scene: string;
   decision: Decision | null;
@@ -40,8 +41,7 @@ export interface State {
   detail: string;
   lastCommand: CommandLog | null;
   lastResult: { skill: string; ok: boolean; detail: string; verdict: string; at: string } | null;
-  hasBefore: boolean;
-  hasAfter: boolean;
+  images: { before: string | null; after: string | null }; // when each snapshot was stored (dashboard reloads on change)
   hw: { arm: Device; camera: Device } | null;
 }
 
@@ -56,13 +56,21 @@ export interface LiveEvent {
   text: string;
 }
 
-const MAX_EVENTS = 200;
+const MAX_EVENTS = 120; // kept in storage, so a freshly opened dashboard still shows the last commands
+const AI_PER_MINUTE = 12; // commands + looks that call Workers AI; protects the bill if the token leaks or a script loops
 
 export class RobotSession extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
-  // In memory only: the live log is for watching, not keeping (it is lost if the DO hibernates while idle).
   private events: LiveEvent[] = [];
-  private lastFrame: string | null = null;
+  private lastFrame: string | null = null; // memory only: frames are for watching, not keeping
+  private aiCalls: number[] = [];
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(async () => {
+      this.events = (await ctx.storage.get<LiveEvent[]>("events")) ?? [];
+    });
+  }
 
   // ------------------------------------------------------------ WebSockets: agent (/api/agent), viewers (/api/live)
 
@@ -72,6 +80,7 @@ export class RobotSession extends DurableObject<Env> {
     if (new URL(request.url).pathname === "/api/live") {
       this.ctx.acceptWebSocket(pair[1], ["viewer"]);
       pair[1].send(`{"type":"backlog","events":${JSON.stringify(this.events)},"frame":${this.lastFrame ?? "null"}}`);
+      pair[1].send(JSON.stringify({ type: "state", state: await this.state() }));
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     for (const old of this.ctx.getWebSockets("agent")) old.close(1000, "replaced by a new agent connection");
@@ -135,21 +144,22 @@ export class RobotSession extends DurableObject<Env> {
           name: String(msg.skill),
           description: String(msg.skill),
         };
-        await this.patch({ status: "idle", current: null, detail: String(msg.detail ?? "done") });
         const result = { skill: skill.name, ok: !!msg.ok, detail: String(msg.detail ?? ""), verdict: "", at: new Date().toISOString() };
         await this.ctx.storage.put("lastResult", result);
+        if (msg.jpeg) await this.putImage("after", msg.jpeg);
+        await this.patch({ status: "idle", current: null, detail: String(msg.detail ?? "done") });
         this.event("done", `${skill.name}: ${result.ok ? "ok" : "not ok"} - ${result.detail}`);
         if (msg.jpeg) {
-          await this.ctx.storage.put("img:after", msg.jpeg);
           // Ask the vision model whether it worked; don't block the agent on it.
           this.event("verify", "after-image sent to Mistral Small 3.1 to double-check the result…");
           this.ctx.waitUntil(
             verifyOutcome(this.env.AI, msg.jpeg, skill, st.mode)
-              .then((verdict) => {
+              .catch((e) => `check failed: ${e}`)
+              .then(async (verdict) => {
                 this.event("verify", verdict);
-                return this.ctx.storage.put("lastResult", { ...result, verdict });
-              })
-              .catch((e) => this.ctx.storage.put("lastResult", { ...result, verdict: `check failed: ${e}` })),
+                await this.ctx.storage.put("lastResult", { ...result, verdict });
+                await this.pushState();
+              }),
           );
         }
         break;
@@ -188,8 +198,20 @@ export class RobotSession extends DurableObject<Env> {
       this.pending.set(id, { resolve, timer });
       ws.send(JSON.stringify({ type: "snapshot", id }));
     });
-    if (jpeg) await this.ctx.storage.put("img:before", jpeg);
+    if (jpeg) {
+      await this.putImage("before", jpeg);
+      await this.pushState();
+    }
     return jpeg;
+  }
+
+  /** Rate limit for anything that calls Workers AI. */
+  async allowAi(): Promise<boolean> {
+    const now = Date.now();
+    this.aiCalls = this.aiCalls.filter((t) => now - t < 60_000);
+    if (this.aiCalls.length >= AI_PER_MINUTE) return false;
+    this.aiCalls.push(now);
+    return true;
   }
 
   async run(skill: string, task = ""): Promise<{ ok: boolean; reason: string }> {
@@ -202,7 +224,7 @@ export class RobotSession extends DurableObject<Env> {
     ws.send(JSON.stringify({ type: "run", skill, task: text }));
     this.event("run", `sent '${skill}' to the ${s.mode} robot` + (text ? ` with the instruction "${text}"` : ""));
     await this.ctx.storage.delete("img:after");
-    await this.patch({ status: "running", current: skill, detail: `running ${skill}` });
+    await this.patch({ status: "running", current: skill, detail: `running ${skill}`, images: { ...s.images, after: null } });
     return { ok: true, reason: "started" };
   }
 
@@ -223,6 +245,7 @@ export class RobotSession extends DurableObject<Env> {
 
   async logCommand(entry: CommandLog): Promise<void> {
     await this.ctx.storage.put("lastCommand", entry);
+    await this.pushState();
   }
 
   /** Append a line to the live log (called by the Worker at each pipeline stage). */
@@ -236,7 +259,19 @@ export class RobotSession extends DurableObject<Env> {
     const e: LiveEvent = { at: new Date().toISOString(), kind, text };
     this.events.push(e);
     if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
+    this.ctx.storage.put("events", this.events); // no await: DO storage writes are ordered and coalesced
     this.broadcast(JSON.stringify({ type: "event", event: e }));
+  }
+
+  /** Dashboards get the robot state pushed on every change (they only poll as a fallback). */
+  private async pushState(): Promise<void> {
+    if (this.ctx.getWebSockets("viewer").length) this.broadcast(JSON.stringify({ type: "state", state: await this.state() }));
+  }
+
+  private async putImage(kind: "before" | "after", jpeg: string): Promise<void> {
+    await this.ctx.storage.put(`img:${kind}`, jpeg);
+    const base = (await this.ctx.storage.get<Partial<State>>("state")) ?? {};
+    await this.ctx.storage.put("state", { ...base, images: { ...(base.images ?? { before: null, after: null }), [kind]: new Date().toISOString() } });
   }
 
   private broadcast(text: string): void {
@@ -264,8 +299,7 @@ export class RobotSession extends DurableObject<Env> {
       detail: base.detail ?? "",
       lastCommand: (await this.ctx.storage.get<CommandLog>("lastCommand")) ?? null,
       lastResult: (await this.ctx.storage.get<State["lastResult"]>("lastResult")) ?? null,
-      hasBefore: !!(await this.ctx.storage.get("img:before")),
-      hasAfter: !!(await this.ctx.storage.get("img:after")),
+      images: base.images ?? { before: null, after: null },
       hw: this.agent() ? (base.hw ?? null) : null,
     };
   }
@@ -273,5 +307,6 @@ export class RobotSession extends DurableObject<Env> {
   private async patch(p: Partial<State>): Promise<void> {
     const base = (await this.ctx.storage.get<Partial<State>>("state")) ?? {};
     await this.ctx.storage.put("state", { ...base, ...p });
+    await this.pushState();
   }
 }

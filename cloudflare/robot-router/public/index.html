@@ -68,6 +68,7 @@
   .legend i.s { width: 9px; height: 9px; border-radius: 50%; background: var(--ink); } .legend i.t { width: 3px; height: 13px; background: var(--accent); }
   .log { margin-top: 12px; height: 280px; overflow-y: auto; font: 12.5px/1.5 ui-monospace, Consolas, monospace; background: var(--bg);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .log:empty::before { content: "Nothing yet. Send a command, press Look, or start the camera preview."; color: var(--muted); }
   .log div { display: grid; grid-template-columns: 74px 64px 1fr; gap: 8px; }
   .log .at { color: var(--muted); } .log .k { font-weight: 600; } .log .x { overflow-wrap: anywhere; }
   .k.heard, .k.camera { color: #3b82c4; } .k.vision { color: #8a5cc4; } .k.router, .k.guard { color: var(--warn); }
@@ -158,6 +159,12 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let token = ""; try { token = localStorage.getItem("robotToken") || ""; } catch {}
+// Share link: https://…/#token=<ROBOT_TOKEN>. The fragment never reaches the server; drop it from the address bar.
+const fromLink = new URLSearchParams(location.hash.slice(1)).get("token");
+if (fromLink) {
+  token = fromLink; try { localStorage.setItem("robotToken", token); } catch {}
+  history.replaceState(null, "", location.pathname + location.search);
+}
 let pendingConfirm = null, lastImgKey = "";
 
 async function api(path, body) {
@@ -188,7 +195,7 @@ function showCommand(c) {
   if (!c) return;
   const d = c.decision;
   $("say").textContent = d?.say || (c.error ? "Something went wrong." : "—");
-  $("heard").textContent = c.transcript || "—";
+  $("heard").textContent = c.source === "button" ? "(skill button, no AI)" : c.transcript || "—";
   $("scene").textContent = c.scene || "—";
   $("decision").innerHTML = d ? `<span class="tag">${d.policy}</span> confidence ${(d.confidence * 100).toFixed(0)}% · <span class="tag ${c.action}">${c.action}</span>` :
     `<span class="tag ${c.action}">${c.action}</span> ${c.error ? " " + c.error : ""}`;
@@ -204,8 +211,12 @@ async function loadImg(kind, el) {
 
 async function poll() {
   if (!token) { $("auth").classList.remove("hidden"); $("statusText").textContent = "enter the robot token below"; return; }
-  try {
-    const s = await (await api("/api/state")).json();
+  try { render(await (await api("/api/state")).json()); }
+  catch (e) { $("statusText").textContent = String(e.message || e); }
+}
+
+// The Durable Object pushes the state over /api/live on every change; polling is only the fallback.
+function render(s) {
     $("dot").className = "dot " + (s.status === "running" ? "run" : s.agentConnected ? "on" : "");
     $("statusText").textContent = s.agentConnected ? `${s.mode} robot · ${s.status}${s.current ? " · " + s.current : ""}` : "robot agent offline";
     showHw(s);
@@ -214,17 +225,23 @@ async function poll() {
       const b = document.createElement("button");
       b.innerHTML = `${k.name}<small>${k.description}</small>`;
       b.disabled = !s.agentConnected || s.status === "running";
-      b.onclick = () => api("/api/run", { skill: k.name });
+      b.onclick = () => { $("say").textContent = `Running ${k.name}…`; api("/api/run", { skill: k.name }); };
       $("skills").appendChild(b);
     }
     if (s.lastCommand && document.activeElement !== $("cmd")) showCommand(s.lastCommand);
     const r = s.lastResult;
-    $("result").textContent = r ? `${r.skill}: ${r.ok ? "ok" : "not ok"} — ${r.detail}${r.verdict ? " · vision check: " + r.verdict : ""}` : "—";
-    const key = `${s.hasBefore}${s.hasAfter}${s.lastCommand?.at}${r?.at}`;
-    if (key !== lastImgKey) { lastImgKey = key; loadImg("before", $("imgBefore")); loadImg("after", $("imgAfter")); }
-  } catch (e) { $("statusText").textContent = String(e.message || e); }
+    // a result older than the last command belongs to the run before it: don't show it under this command
+    const fresh = r && !(s.lastCommand && r.at < s.lastCommand.at);
+    $("result").textContent = s.status === "running" ? `running ${s.current}…` :
+      fresh ? `${r.skill}: ${r.ok ? "ok" : "not ok"} — ${r.detail}${r.verdict ? " · vision check: " + r.verdict : ""}` : "—";
+    const key = `${s.images?.before}|${s.images?.after}`;
+    if (key !== lastImgKey) {
+      lastImgKey = key;
+      loadImg("before", $("imgBefore")).then(() => { if (!$("liveImg").src && $("imgBefore").src) $("liveImg").src = $("imgBefore").src; });
+      loadImg("after", $("imgAfter"));
+    }
 }
-setInterval(poll, 1500); poll();
+setInterval(() => { if (!live || live.readyState !== 1) poll(); }, 2000); poll();
 
 // --- status line: camera preview + read-only arm connection on the robot laptop
 let hwState = null;
@@ -237,13 +254,14 @@ function showHw(s) {
     $(dot).className = "dot " + (d ? d.state : "off");
     $(text).textContent = d ? d.detail : (s.agentConnected ? "—" : "robot agent offline");
     $(btn).textContent = d && d.state !== "off" && d.state !== "error" ? on : off;
-    $(btn).disabled = busy || (key === "arm" && s.mode === "sim");
+    $(btn).disabled = busy;
+    $(btn).hidden = key === "arm" && s.mode === "sim"; // the sim arm is always connected
   }
   $("lookBtn").disabled = busy;
 }
 const hwToggle = (key, onAction, offAction) => () => {
   const d = hwState?.[key], isOn = d && d.state !== "off" && d.state !== "error";
-  api("/api/hw", { action: isOn ? offAction : onAction }).then(() => setTimeout(poll, 400));
+  api("/api/hw", { action: isOn ? offAction : onAction });
 };
 $("armBtn").onclick = hwToggle("arm", "arm_on", "arm_off");
 $("camBtn").onclick = hwToggle("camera", "camera_on", "camera_off");
@@ -276,6 +294,7 @@ function connectLive() {
       if (m.frame) showFrame(m.frame, false);
     }
     else if (m.type === "event") addLog(m.event);
+    else if (m.type === "state") render(m.state);
     else if (m.type === "frame") showFrame(m, true);
   };
   live.onclose = () => { clearTimeout(liveRetry); liveRetry = setTimeout(connectLive, 2000); };
@@ -321,6 +340,9 @@ function showFrame(f, fresh) {
     addLog({ kind: "joints", text: `t=${f.t.toFixed(1)}s target ` + f.joints.map((j, i) => `${(JOINT_LABELS[j] || j).split(" ").pop()} ${f.target[i].toFixed(0)}`).join(" · ") });
   }
 }
+// joint rows exist before the first frame, so the panel never looks empty
+showFrame({ jpeg: null, joints: Object.keys(JOINT_LABELS), state: null, target: null, label: "waiting for frames…" }, true);
+$("liveBadge").textContent = "no live frames yet";
 connectLive();
 
 // --- push-to-talk: record, convert to 16 kHz mono WAV (what Whisper expects), send base64

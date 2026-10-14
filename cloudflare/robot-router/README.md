@@ -20,8 +20,9 @@ browser dashboard ──/api/command──► Worker ──► Workers AI: Whisp
 * **Live panel** (dashboard WebSocket `/api/live`): every pipeline stage is logged as it happens (heard →
   camera → vision → router → guardrail → run → policy inference → result → vision check). While a skill runs
   (sim or real), the agent also streams ~8 Hz 320×240 frames with the 6 joint positions and the targets the
-  policy commands, which the dashboard draws as bars. The log lives in the Durable Object's memory, so it starts
-  empty after it hibernates.
+  policy commands, which the dashboard draws as bars. The last 120 log lines are kept in Durable Object storage,
+  so a dashboard opened later still shows them. The same socket pushes the robot state on every change; the
+  dashboard only polls `/api/state` when the socket is down.
 * **Status line** (top of the dashboard, `POST /api/hw`): the arm and camera on the robot laptop, each with a
   button. *Camera → Start preview* streams ~4 fps to the Live panel (off again after 10 min). *Arm → Connect*
   opens the follower's COM port **read-only**: it reads joint positions for the bars and never changes torque, so
@@ -31,6 +32,12 @@ browser dashboard ──/api/command──► Worker ──► Workers AI: Whisp
   During a real rollout/replay `host/live_hook.py` mirrors lerobot's own camera frames, joint positions and
   targets to the Live panel.
 * Every `/api` route needs the shared secret `ROBOT_TOKEN` (`Authorization: Bearer …`, agent and live view: `?token=`).
+  Share link for teammates: `https://<worker>/#token=<ROBOT_TOKEN>`. The part after `#` never reaches the server,
+  and the page stores the token and removes it from the address bar.
+* **Guardrails in code:** at most 12 AI-routed commands / Looks per minute (protects the Workers AI bill); a skill
+  button press is logged like a command, so "Last command" and its result always describe the same run; only one
+  robot agent at a time, and an agent that gets replaced by another laptop exits instead of reconnecting; a blank
+  camera frame (lens covered, wrong index) is never sent to the vision model, which would otherwise invent a scene.
 
 ## Models
 
