@@ -19,7 +19,19 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from selfcheck import cube_mask, grab_frame, open_camera, sample_hsv  # noqa: E402  (camera: selfcheck.camera_cfg)
+from selfcheck import cube_mask, grab_frame, open_camera  # noqa: E402  (camera: selfcheck.camera_cfg)
+from selfcheck import sample_hsv as _sample_colour  # noqa: E402
+
+
+def sample_hsv(frame: np.ndarray, x: int, y: int, r: int = 6) -> tuple[list, list]:
+    """Colour range around a clicked point. White/grey objects (low saturation) get an any-hue, low-saturation,
+    bright range: white cups on a dark board."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    patch = hsv[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1].reshape(-1, 3)
+    _, s, v = np.median(patch, axis=0).astype(int)
+    if s < 50:
+        return [0, 0, max(90, int(v) - 70)], [179, min(110, int(s) + 50), 255]
+    return _sample_colour(frame, x, y, r)
 
 SETUP_FILE = HERE / "vision_setup.json"
 GREEN, RED, ORANGE, GREY, YELLOW, WHITE = (60, 200, 60), (40, 40, 230), (0, 140, 255), (150, 150, 150), (0, 210, 255), (255, 255, 255)
@@ -121,6 +133,21 @@ def annotate(frame: np.ndarray, setup: dict, states: list[dict], ball=None) -> n
     return out
 
 
+def board_hull(frame: np.ndarray, min_frac: float = 0.08):
+    """Outline of the dark board the cups stand on (largest dark area), or None. Cups are only searched inside it,
+    so the white table, cables and the robot's wires around it never count as cups."""
+    dark = cv2.inRange(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV), (0, 0, 0), (179, 255, 70))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(dark)
+    if n < 2:
+        return None
+    i = 1 + int(np.argmax(stats[1:, 4]))
+    if stats[i][4] < min_frac * frame.shape[0] * frame.shape[1]:
+        return None
+    pts = cv2.findNonZero((labels == i).astype(np.uint8))
+    return cv2.convexHull(pts)
+
+
 def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
     """Cup-colour blobs anywhere in the frame: {"uv": (u, v), "px", "bbox": (x, y, w, h)}, largest first.
     Blobs touching the border are kept. Touching cups merge into one blob (cups must not touch)."""
@@ -130,7 +157,10 @@ def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
     n, _, stats, cents = cv2.connectedComponentsWithStats(mask(frame, setup["cup_hsv"]))
     cups = [{"uv": (float(cents[i][0]), float(cents[i][1])), "px": int(stats[i][4]),
              "bbox": tuple(int(x) for x in stats[i][:4])}
-            for i in range(1, n) if stats[i][4] >= setup.get("min_cup_px", 400) * area]
+            for i in range(1, n) if setup.get("min_cup_px", 400) * area <= stats[i][4] <= setup.get("max_cup_px", 15000) * area]
+    hull = board_hull(frame) if setup.get("board_only", True) else None
+    if hull is not None:
+        cups = [c for c in cups if cv2.pointPolygonTest(hull, c["uv"], False) >= 0]
     return sorted(cups, key=lambda c: -c["px"])
 
 
@@ -202,7 +232,7 @@ def cmd_setup(a):
         if len(pts) == 5 and st["cup"] and st["ball"]:
             h, w = frame.shape[:2]
             setup = {"slots": [[x, y, r] for x, y in pts[:4]], "cup_hsv": st["cup"], "ball_hsv": st["ball"],
-                     "min_cup_px": a.min_cup_px, "min_ball_px": a.min_ball_px,
+                     "min_cup_px": a.min_cup_px, "max_cup_px": a.max_cup_px, "min_ball_px": a.min_ball_px,
                      "max_offset_frac": a.max_offset_frac, "frame_size": [w, h]}
             states = slot_states(frame, setup)
             view = annotate(frame, setup, states, ball_visible(frame, setup))
@@ -286,7 +316,8 @@ def main():
         s.add_argument("--image", help="use a saved image instead of the camera")
         s.set_defaults(fn=fn)
         if name == "setup":
-            s.add_argument("--min-cup-px", type=int, default=400)
+            s.add_argument("--min-cup-px", type=int, default=1500)
+            s.add_argument("--max-cup-px", type=int, default=15000, help="bigger white areas (table edge) are not cups")
             s.add_argument("--min-ball-px", type=int, default=80)
             s.add_argument("--max-offset-frac", type=float, default=0.5)
     a = p.parse_args()

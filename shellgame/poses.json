@@ -8,12 +8,12 @@
     "gripper.pos": 5.28
   },
   "ready": {
-    "shoulder_pan.pos": -0.18,
+    "shoulder_pan.pos": -0.26,
     "shoulder_lift.pos": -87.6,
     "elbow_flex.pos": 94.33,
-    "wrist_flex.pos": 75.82,
-    "wrist_roll.pos": -0.66,
-    "gripper.pos": 2.79
+    "wrist_flex.pos": 75.65,
+    "wrist_roll.pos": -0.75,
+    "gripper.pos": 2.67
   },
   "above_1": {
     "shoulder_pan.pos": 44.4,
