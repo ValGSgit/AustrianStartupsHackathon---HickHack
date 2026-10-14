@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from vision import ball_visible, check_layout, sample_hsv, slot_states, annotate
+from vision import annotate, ball_visible, check_layout, find_cups, nearest_cup, sample_hsv, slot_states
 
 SLOTS = [(120, 300), (250, 300), (390, 300), (520, 300)]
 R = 40
@@ -83,6 +83,31 @@ def test_frame_scaling():
         assert occ(st) == [False, True, True, True], (size, st)
         assert [s["off_center"] for s in st] == [False, False, False, True], (size, st)
         assert ball_visible(f, setup, slot=1)[0] and not ball_visible(f, setup, slot=3)[0], size
+
+
+def test_find_cups():
+    setup = make_setup()
+    img = np.full((480, 640, 3), 70, np.uint8)
+    cv2.circle(img, (150, 200), 45, BLUE, -1)      # biggest
+    cv2.circle(img, (400, 330), 35, BLUE, -1)
+    cv2.circle(img, (630, 100), 30, BLUE, -1)      # touches the right border: kept
+    cv2.circle(img, (300, 420), 25, ORANGE, -1)    # ball colour: not a cup
+    cv2.circle(img, (500, 420), 6, BLUE, -1)       # speck below min_cup_px
+    cups = find_cups(img, setup)
+    assert len(cups) == 3, cups
+    assert [c["px"] for c in cups] == sorted((c["px"] for c in cups), reverse=True), cups
+    (u, v), x, y = cups[0]["uv"], *cups[0]["bbox"][:2]
+    assert abs(u - 150) < 1 and abs(v - 200) < 1 and abs(x - 105) <= 1 and abs(y - 155) <= 1, cups[0]
+    assert abs(cups[1]["uv"][0] - 400) < 1 and abs(cups[1]["uv"][1] - 330) < 1, cups[1]
+    assert nearest_cup(cups, (410, 320), 40) is cups[1]
+    assert nearest_cup(cups, (300, 420), 40) is None and nearest_cup([], (0, 0), 1e9) is None
+    big = cv2.resize(img, (1280, 960), interpolation=cv2.INTER_NEAREST)  # min_cup_px scales with area
+    assert [round(c["uv"][0] / 2) for c in find_cups(big, setup)] == [round(c["uv"][0]) for c in cups]
+    try:
+        find_cups(img, {k: v for k, v in setup.items() if k != "cup_hsv"})
+        raise AssertionError("missing cup_hsv should raise")
+    except ValueError as e:
+        assert "cup_hsv" in str(e)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
     .venv\\Scripts\\python shellgame\\show.py                        # SPACE = play, 1-4 = guess, ESC = stop (arm holds), q = quit
     .venv\\Scripts\\python shellgame\\show.py --moves 5 --speed 1.3 --fullscreen
     .venv\\Scripts\\python shellgame\\show.py --fake --no-vision --moves 3 --auto   # no hardware, one game, no keys
+    .venv\\Scripts\\python shellgame\\show.py --seen                     # camera-guided: grab cups where they are seen
 
 The robot runs in a worker thread; the window stays live. ESC sets a stop flag: the next servo command is not sent
 and the arm holds where it is (torque stays on). q goes home slowly and switches the motors off.
@@ -45,6 +46,8 @@ class Show:
         self.frame = None                        # latest camera frame (main thread writes)
         self.frame_n = 0
         self.worker: threading.Thread | None = None
+        self.cap = None
+        self.plan = None                         # --seen: (cups, src_uv, dst_uv, found, frame size) drawn on screen
 
     # ------------------------------------------------ helpers used by the worker
     def set(self, title, color, sub=""):
@@ -79,6 +82,43 @@ class Show:
                 return k
 
     # ------------------------------------------------ the game (worker thread)
+    def target(self, s, src, dst=None):
+        """--seen: arm at ready, look, pick the cup seen nearest slot src. Returns (src_uv, dst_uv, frame size)."""
+        import motions as M
+        import shuffle as S
+        import vision as V
+        M.go_ready(self.arm, self.poses)
+        frame = self.fresh_frame() if self.cap is not None else None
+        if frame is None and self.a.fake:
+            size, cups = self.setup["frame_size"], S.fake_cups(self.setup, s, self.rng)
+        elif frame is None:
+            size, cups = self.setup["frame_size"], []
+        else:
+            size, cups = (frame.shape[1], frame.shape[0]), V.find_cups(frame, self.setup)
+        src_uv, dst_uv, found = S.plan(cups, self.setup, size, src, dst)
+        self.plan = (cups, src_uv, dst_uv, found, size)
+        print(f"  camera: {len(cups)} cups; slot {src} cup at ({src_uv[0]:.0f}, {src_uv[1]:.0f})", flush=True)
+        if not found:
+            print(f"  WARNING: no cup seen near slot {src}, using the slot centre", flush=True)
+            self.say(f"I cannot see cup {src}. Using its mark.")
+        return src_uv, dst_uv, size
+
+    def move(self, s, move):
+        import motions as M
+        if not self.a.seen:
+            return M.move_cup(self.arm, self.poses, *move)
+        src_uv, dst_uv, size = self.target(s, *move)
+        M.move_cup_seen(self.arm, self.model, src_uv, dst_uv, frame_size=size)
+        self.plan = None
+
+    def reveal_fn(self, s, slot):
+        """The motion that lifts the cup in `slot` (seen: where the camera finds it)."""
+        import motions as M
+        if not self.a.seen:
+            return lambda: M.reveal(self.arm, self.poses, slot)
+        uv, _, size = self.target(s, slot)
+        return lambda: M.reveal_seen(self.arm, self.model, uv, frame_size=size)
+
     def check_cups(self, s, problems_log):
         import game as G
         import motions as M
@@ -118,10 +158,11 @@ class Show:
         self.set("Watch the ball", AMBER, f"the ball is under cup {start}")
         self.say(f"Watch closely. The ball is under cup {start}.")
         M.go_ready(self.arm, self.poses)
-        M.show_ball(self.arm, self.poses, start)
+        self.reveal_fn(s, start)()
+        self.plan = None
         for k, move in enumerate(moves, 1):
             self.set(f"Shuffling {k}/{len(moves)}", AMBER, "keep your eyes on the ball")
-            M.move_cup(self.arm, self.poses, *move)
+            self.move(s, move)
             s = G.apply(s, move)
             print(f"move {k}: {move[0]} -> {move[1]}   ball in slot {G.ball_slot(s)}", flush=True)
             if self.vision:
@@ -134,7 +175,7 @@ class Show:
         self.say("Which cup is the ball under?")
         guess = 1 if a.auto else int(self.wait_key({str(i) for i in cups}))
         self.set(f"You said cup {guess}", AMBER, "let's see...")
-        verified, seen = self.reveal(ball)
+        verified, seen = self.reveal(s, ball)
         if guess == ball:
             line = "You got me."
         else:
@@ -149,18 +190,19 @@ class Show:
         self.say(line)
         log(a, ball, guess, verified, problems + ([] if verified is not False else [f"ball not seen ({seen} px)"]))
 
-    def reveal(self, slot):
+    def reveal(self, s, slot):
         """Lift the cup; meanwhile watch for the ball near that slot. Returns (verified or None, max ball px)."""
-        import motions as M
         import vision as V
+        lift = self.reveal_fn(s, slot)
         if not self.vision:
-            M.reveal(self.arm, self.poses, slot)
+            lift()
+            self.plan = None
             return None, 0
         done, err = threading.Event(), []
 
         def run():
             try:
-                M.reveal(self.arm, self.poses, slot)
+                lift()
             except Exception as e:
                 err.append(e)
             finally:
@@ -173,6 +215,7 @@ class Show:
                 ok, info = V.ball_visible(self.frame, self.setup, slot)
                 hits, best = hits + ok, max(best, info["px"])
             time.sleep(0.03)
+        self.plan = None
         if err:
             raise err[0]
         return hits >= 3, best
@@ -196,19 +239,24 @@ class Show:
         A.SPEED = a.speed
         import motions as M
         self.poses = A.load_poses()
-        if a.fake and M.missing_poses(self.poses):
+        need = lambda p: [n for n in ("home", "ready") if n not in p] if a.seen else M.missing_poses(p)  # noqa: E731
+        if a.fake and need(self.poses):
             self.poses = M.fake_poses()
             print("fake run: using generated poses (poses.json missing or incomplete)")
-        missing = M.missing_poses(self.poses)
+        missing = need(self.poses)
         if missing:
             sys.exit(f"poses not taught: {', '.join(missing)}\nrun: .venv\\Scripts\\python shellgame\\teach.py teach")
-        cap = None
         self.vision = not a.no_vision and not a.mock_camera
-        if self.vision:
-            import selfcheck
+        if a.seen:
+            import shuffle as S
+            self.setup, self.model = S.seen_setup(a.setup, a.fake), S.seen_model(a.fake)
+        elif self.vision:
             import vision as V
-            self.setup = V.load_setup()
-            cap = selfcheck.open_camera()
+            self.setup = V.load_setup(Path(a.setup) if a.setup else None)
+        cap = None
+        if self.vision or (a.seen and not a.fake and not a.mock_camera):
+            import selfcheck
+            self.cap = cap = selfcheck.open_camera()
         seed = a.seed if a.seed is not None else random.randrange(10**6)
         self.rng = random.Random(seed)
         print(f"seed {seed}  speed {a.speed}  moves {a.moves}  vision {'on' if self.vision else 'off'}")
@@ -241,6 +289,12 @@ class Show:
                 if img is not None and self.vision:
                     import vision as V
                     img = V.annotate(img, self.setup, V.slot_states(img, self.setup))
+                plan = self.plan
+                if plan is not None:  # --seen: what the robot sees and where it will slide the cup
+                    import shuffle as S
+                    if img is None:
+                        img = np.full((plan[4][1], plan[4][0], 3), 40, np.uint8)
+                    img = S.draw_plan(img, *plan)
                 title, color, sub = self.ui
                 k = stage.show(stage.screen(title, color, sub, img), 30)
                 busy = self.worker is not None and self.worker.is_alive()
@@ -296,6 +350,8 @@ def main():
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--seed", type=int)
     p.add_argument("--fullscreen", action="store_true")
+    p.add_argument("--seen", action="store_true", help="camera-guided: grab each cup where the camera sees it")
+    p.add_argument("--setup", help="vision setup file (default shellgame/vision_setup.json)")
     p.add_argument("--auto", action="store_true", help="testing: auto SPACE, guess 1, exit after one game")
     result = Show(p.parse_args()).main()
     print(f"result: {result}")

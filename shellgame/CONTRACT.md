@@ -74,3 +74,47 @@ SPACE start -> show ball -> shuffle N random moves (camera check after each, nud
 (keys 1-4) -> reveal the ball's slot -> camera verifies the ball -> VERIFIED / MISSED screen. ESC = stop (arm holds), q = quit.
 Flags: `--fake`, `--no-vision`, `--moves 7`, `--speed 1.0`, `--seed`, `--fullscreen`. Each game is logged to
 `evals/shell_log.csv` (time, moves, speed, ball_slot, guess, verified, problems).
+
+## Camera-guided grabbing (v2: "the robot sees")
+
+The camera finds where each cup really is; the arm pose for a cup at image point (u, v) is predicted from taught samples.
+Slots stay as table destinations (pixel centres clicked in `vision.py setup`); cups are grabbed where they are seen.
+
+### Samples (`shellgame/reach_samples.json`, written by `teach.py sample`)
+```json
+[{"uv": [u, v], "frame_size": [w, h], "poses": {"above": {...6 joints}, "grip": {...}, "in": {...}, "lift": {...}}}, ...]
+```
+One sample = one cup alone on the table, its centroid seen by the camera (arm at `ready`, out of view), then the 4 poses
+taught with the leader for that cup (same meaning as above_i/grip_i/in_i/lift_i). 6-8 samples spread over the cup area.
+
+### `shellgame/reach.py`
+```python
+KINDS = ("above", "grip", "in", "lift")
+class ReachModel:
+    @classmethod
+    def fit(cls, samples: list[dict]) -> "ReachModel"   # per kind, per joint: least squares on features of (u, v)
+        # >= 6 samples: [1, u, v, uv, u^2, v^2] with small ridge; 3-5: [1, u, v]; < 3: ValueError. u, v normalised to 0..1.
+        # gripper: not regressed, mean of the samples' value for that kind.
+    def predict(self, u: float, v: float) -> dict[str, dict[str, float]]   # {"above": pose, "grip": pose, ...}
+    def loo_errors(self) -> dict[str, float]           # leave-one-out mean abs error (deg) per kind, for `check`
+def load_model(path=SAMPLES_FILE) -> ReachModel        # FileNotFoundError / ValueError with a clear message
+```
+CLI: `reach.py check` (samples count, LOO error per kind/joint, warns if any > 5 deg, prints the u,v coverage box),
+`reach.py go U V [--kind above]` (moves slowly there, Enter between steps), `reach.py go-cup` (camera finds the single
+cup, robot goes ready -> above -> grip(open), Enter between steps: the "can it find a cup" test).
+
+### Vision additions (`shellgame/vision.py`)
+```python
+find_cups(frame, setup) -> list[dict]   # cup-colour blobs: {"uv": (u, v), "px": int, "bbox": (x, y, w, h)}, largest first,
+                                        # area >= min_cup_px, split nothing (cups must not touch)
+nearest_cup(cups, uv, max_dist) -> dict | None
+```
+
+### Seen motions (`shellgame/motions.py`)
+```python
+move_cup_seen(arm, model, src_uv, dst_uv) -> None    # same sequence as move_cup with model.predict(src) / predict(dst)
+reveal_seen(arm, model, uv, hold_s=1.5) -> None
+```
+show.py / shuffle.py get `--seen`: before each move (arm at ready) grab a frame, find the cup nearest the source slot
+centre (within 1.5 r) and grab it there; place it at the destination slot centre. The screen draws the detected cups and
+the planned source -> destination arrow.

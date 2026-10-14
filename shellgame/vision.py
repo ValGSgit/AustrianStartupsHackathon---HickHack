@@ -4,6 +4,7 @@ Deterministic HSV colour masks, no AI (same approach as selfcheck.py).
     .venv\\Scripts\\python shellgame\\vision.py setup [--camera N]   # click slot centres 1-4, edge of cup 1, a cup, the ball; s = save
     .venv\\Scripts\\python shellgame\\vision.py live                 # annotated live view, q quits
     .venv\\Scripts\\python shellgame\\vision.py once [--image PATH]  # one frame, prints slot states
+    .venv\\Scripts\\python shellgame\\vision.py cups [--image PATH]  # live detected cups with their u,v, q quits
 
 Saves shellgame/vision_setup.json + shellgame/vision_setup.jpg (reference photo of the layout).
 """
@@ -120,6 +121,38 @@ def annotate(frame: np.ndarray, setup: dict, states: list[dict], ball=None) -> n
     return out
 
 
+def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
+    """Cup-colour blobs anywhere in the frame: {"uv": (u, v), "px", "bbox": (x, y, w, h)}, largest first.
+    Blobs touching the border are kept. Touching cups merge into one blob (cups must not touch)."""
+    if not setup.get("cup_hsv"):
+        raise ValueError("vision setup has no cup_hsv. Run: .venv\\Scripts\\python shellgame\\vision.py setup")
+    _, area = scaled(frame, {**setup, "slots": []})
+    n, _, stats, cents = cv2.connectedComponentsWithStats(mask(frame, setup["cup_hsv"]))
+    cups = [{"uv": (float(cents[i][0]), float(cents[i][1])), "px": int(stats[i][4]),
+             "bbox": tuple(int(x) for x in stats[i][:4])}
+            for i in range(1, n) if stats[i][4] >= setup.get("min_cup_px", 400) * area]
+    return sorted(cups, key=lambda c: -c["px"])
+
+
+def nearest_cup(cups: list[dict], uv, max_dist: float) -> dict | None:
+    """Cup whose centroid is closest to uv (pixels), or None if none within max_dist."""
+    best = min(cups, key=lambda c: np.hypot(c["uv"][0] - uv[0], c["uv"][1] - uv[1]), default=None)
+    if best is None or np.hypot(best["uv"][0] - uv[0], best["uv"][1] - uv[1]) > max_dist:
+        return None
+    return best
+
+
+def draw_cups(frame: np.ndarray, cups: list[dict]) -> np.ndarray:
+    out = frame.copy()
+    for i, c in enumerate(cups, 1):
+        x, y, w, h = c["bbox"]
+        u, v = round(c["uv"][0]), round(c["uv"][1])
+        cv2.rectangle(out, (x, y), (x + w, y + h), GREEN, 2)
+        cv2.drawMarker(out, (u, v), YELLOW, cv2.MARKER_CROSS, 18, 2)
+        cv2.putText(out, f"{i}: ({u},{v}) {c['px']}px", (x, max(15, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 2)
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 
 def frames(a):
@@ -227,11 +260,27 @@ def cmd_once(a):
     print("annotated frame: shellgame/vision_last.jpg")
 
 
+def cmd_cups(a):
+    setup = load_setup()
+    last = None
+    for frame in frames(a):
+        cups = find_cups(frame, setup)
+        msg = "  ".join(f"({c['uv'][0]:.0f},{c['uv'][1]:.0f})" for c in cups)
+        if msg != last:
+            print(f"{len(cups)} cup(s): {msg}", flush=True)
+            last = msg
+        cv2.imshow("vision cups", draw_cups(frame, cups))
+        if cv2.waitKey(30) & 0xFF in (ord("q"), 27):
+            break
+    cv2.destroyAllWindows()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn, help_ in [("setup", cmd_setup, "click slots, radius, cup and ball colours"),
-                            ("live", cmd_live, "annotated live view"), ("once", cmd_once, "one frame, print states")]:
+                            ("live", cmd_live, "annotated live view"), ("once", cmd_once, "one frame, print states"),
+                            ("cups", cmd_cups, "live detected cups with their u,v")]:
         s = sub.add_parser(name, help=help_)
         s.add_argument("--camera", type=int, help="override the [cameras.front] index from config")
         s.add_argument("--image", help="use a saved image instead of the camera")

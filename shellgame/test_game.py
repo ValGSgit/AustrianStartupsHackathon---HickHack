@@ -102,6 +102,43 @@ def test_fake_arm_motions():
     assert grips[-1] == poses["above_4"]["gripper.pos"]
 
 
+class TinyModel:
+    """Predicts slot poses from the image x: u < 100 -> slot 1 ... u >= 300 -> slot 4 (records the calls)."""
+
+    def __init__(self):
+        self.poses, self.calls = M.fake_poses(), []
+
+    def predict(self, u, v, frame_size=None):
+        self.calls.append((u, v))
+        return M.slot_poses(self.poses, min(4, 1 + int(u // 100)))
+
+
+def record(run, start):
+    """All actions sent while run(arm) moves a FakeArm that starts at `start`."""
+    arm = A.FakeArm()
+    arm.state = dict(start)
+    sent = []
+    arm.send_action = lambda a, f=arm.send_action: (sent.append(dict(a)), f(a))[1]
+    run(arm)
+    return sent
+
+
+def test_seen_motions():
+    model, poses = TinyModel(), M.fake_poses()
+    # seen motions = the slot motions minus the leading "go to ready" (the arm already waits there to look)
+    slot = record(lambda a: M.move_cup(a, poses, 1, 4), poses["ready"])
+    seen = record(lambda a: M.move_cup_seen(a, model, (50, 9), (350, 9)), poses["ready"])
+    assert seen and slot[-len(seen):] == seen
+    slot = record(lambda a: M.reveal(a, poses, 3, hold_s=0), poses["ready"])
+    seen = record(lambda a: M.reveal_seen(a, model, (250, 9), hold_s=0), poses["ready"])
+    assert seen == slot
+    assert model.calls == [(50, 9), (350, 9), (250, 9)]
+    fm = M.FakeModel(640)
+    left, right = fm.predict(0, 240), fm.predict(640, 240)
+    assert abs(left["above"]["shoulder_pan.pos"] + 30) < 1e-6 and abs(right["above"]["shoulder_pan.pos"] - 30) < 1e-6
+    assert set(left) == set(M.KINDS)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

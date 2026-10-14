@@ -7,6 +7,8 @@
     .venv\\Scripts\\python shellgame\\teach.py list                         # which poses are taught / missing
     .venv\\Scripts\\python shellgame\\teach.py go above_3 --seconds 2       # move there smoothly
     .venv\\Scripts\\python shellgame\\teach.py test-slot 2                  # above -> grip -> in -> grip -> above, Enter between
+    .venv\\Scripts\\python shellgame\\teach.py sample [--count 6]          # v2: camera sees ONE cup, teach its 4 poses
+    .venv\\Scripts\\python shellgame\\teach.py samples [--drop 3]          # list / delete reach samples
 
 While teaching: Enter = save the FOLLOWER's pose for this step, b + Enter = back, s + Enter = skip, q + Enter = quit.
 Every command ends by going slowly to `home` and switching the motors off (also on Ctrl+C).
@@ -14,11 +16,15 @@ All commands take --fake (no hardware).
 """
 
 import argparse
+import json
 import queue
+import random
 import sys
 import threading
 import time
 from pathlib import Path
+
+import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arm as A  # noqa: E402
@@ -32,20 +38,22 @@ FAKE_POSES = A.POSES_FILE.with_name("poses_fake.json")
 HINTS = {
     "home": "RESTING pose: arm folded down, safe to go limp.",
     "ready": "READY pose: arm high and OUT of the camera's view of the 4 slots (waits here between moves).",
-    "above": "jaws OPEN, about 4 cm above the top of the cup in slot {i}.",
-    "grip": "jaws around the LOW part of the cup in slot {i}, CLOSED, squeeze a little.",
-    "in": "pull the cup in slot {i} about 1.5 cup widths toward the base, keep it ON the table (still closed).",
-    "lift": "lift the cup in slot {i} straight up about 8 cm (still closed).",
+    "above": "jaws OPEN, about 4 cm above the top of {cup}.",
+    "grip": "jaws around the LOW part of {cup}, CLOSED, squeeze a little.",
+    "in": "pull {cup} about 1.5 cup widths toward the base, keep it ON the table (still closed).",
+    "lift": "lift {cup} straight up about 8 cm (still closed).",
 }
+KINDS = ("above", "grip", "in", "lift")
+SAMPLES_FILE = Path(__file__).resolve().parent / "reach_samples.json"
 
 
 def required(slots=(1, 2, 3, 4)) -> list[str]:
-    return ["home", "ready"] + [f"{k}_{i}" for i in slots for k in ("above", "grip", "in", "lift")]
+    return ["home", "ready"] + [f"{k}_{i}" for i in slots for k in KINDS]
 
 
 def hint(name: str) -> str:
     base, _, i = name.partition("_")
-    return HINTS.get(base, HINTS.get(name, "")).format(i=i)
+    return HINTS.get(base, HINTS.get(name, "")).format(cup=f"the cup in slot {i}" if i else "this cup")
 
 
 def gap(key: str, a: float, b: float) -> float:
@@ -90,8 +98,9 @@ def torque(arm, on: bool) -> None:
         arm.bus.disable_torque()
 
 
-def match_start_pose(arm, leader, typed: queue.Queue) -> bool:
-    """Don't start copying while the arms are far apart: the follower would swing through the table."""
+def match_start_pose(arm, leader, typed: queue.Queue, limp: bool = True) -> bool:
+    """Don't start copying while the arms are far apart: the follower would swing through the table.
+    limp=False: the follower keeps holding its pose (e.g. high at ready), only the leader is moved to match."""
     while True:
         want, have = leader.get_action(), A.read_pose(arm)
         far = [k for k in A.KEYS if k != "gripper.pos" and gap(k, want[k], have[k]) > MAX_START_DIFF]
@@ -100,11 +109,15 @@ def match_start_pose(arm, leader, typed: queue.Queue) -> bool:
         print("\nLeader and follower are in different poses:")
         for k in far:
             print(f"  {k[:-4]:14s} leader {want[k]:7.1f}   follower {have[k]:7.1f}")
-        torque(arm, False)
-        print("Follower motors are OFF. Put both arms in the same pose (easiest: both resting), then Enter. (q = quit)")
+        if limp:
+            torque(arm, False)
+            print("Follower motors are OFF. Put both arms in the same pose (easiest: both resting), then Enter. (q = quit)")
+        else:
+            print("The follower HOLDS its pose. Move the LEADER into the same pose, then Enter. (q = quit)")
         if typed.get() == "q":
             return False
-        torque(arm, True)
+        if limp:
+            torque(arm, True)
 
 
 def stdin_lines() -> queue.Queue:
@@ -117,6 +130,64 @@ def stdin_lines() -> queue.Queue:
         q.put("q")
     threading.Thread(target=read, daemon=True).start()
     return q
+
+
+def follow_steps(arm, leader, typed: queue.Queue, steps: list[str], get, put, hand: bool = False) -> bool:
+    """Follower copies the leader (or hand mode); Enter stores the follower's pose for the current step via
+    put(name, pose); get(name) = stored pose or None. b/s/q = back/skip/quit. True = went through all steps."""
+    print("(b + Enter = back, s + Enter = skip, q + Enter = quit)")
+    i, shown, blocked_since = 0, -1, None
+    while i < len(steps):
+        t0 = time.perf_counter()
+        if shown != i:
+            taught = " (already taught, Enter overwrites)" if get(steps[i]) is not None else ""
+            print(f"\nSTEP {i + 1}/{len(steps)}  {steps[i]}: {hint(steps[i])}{taught}", flush=True)
+            shown = i
+        cmd = None
+        if leader:
+            cmd = leader.get_action()
+            try:
+                arm.send_action({k: cmd[k] for k in A.KEYS})
+                have = A.read_pose(arm)
+            except (RuntimeError, ConnectionError) as e:
+                print(f"\nA motor reported a problem ({e}). Stopping - something may block the arm.")
+                return False
+            stuck = [k for k in A.KEYS if k != "gripper.pos" and gap(k, cmd[k], have[k]) > BLOCKED_DIFF]
+            blocked_since = None if not stuck else (blocked_since or time.time())
+            if blocked_since and time.time() - blocked_since > BLOCKED_SECONDS:
+                print(f"\nThe follower cannot reach the leader's pose ({', '.join(k[:-4] for k in stuck)}): "
+                      "something blocks it. Stopping to protect the motors.")
+                return False
+        try:
+            line = typed.get_nowait()
+        except queue.Empty:
+            line = None
+        if line == "q":
+            return False
+        if line == "b":
+            i = max(0, i - 1)
+        elif line == "s":
+            print(f"   skipped {steps[i]}")
+            i += 1
+        elif line is not None:
+            pose = A.read_pose(arm)
+            kind = steps[i].partition("_")[0]
+            if cmd and kind == "grip":
+                # keep the leader's squeeze: the follower's gripper is stopped by the cup, the command is not
+                pose["gripper.pos"] = cmd["gripper.pos"]
+            elif hand and kind == "grip":
+                # by hand the jaws only touch the cup; command a bit further closed so they squeeze
+                pose["gripper.pos"] = max(0.0, pose["gripper.pos"] - HAND_SQUEEZE)
+            put(steps[i], pose)
+            print(f"   saved {steps[i]}: " + " ".join(f"{k[:-4]}={v:.1f}" for k, v in pose.items()))
+            above_name = steps[i].replace(kind, "above", 1)
+            above = get(above_name)
+            if kind in ("grip", "in", "lift") and above and abs(pose["shoulder_pan.pos"] - above["shoulder_pan.pos"]) > 12:
+                print(f"   CHECK: base rotation differs {pose['shoulder_pan.pos'] - above['shoulder_pan.pos']:+.0f} deg "
+                      f"from {above_name}. Same cup = almost the same rotation. Type b + Enter to redo.")
+            i += 1
+        time.sleep(max(0.0, 1 / A.FPS - (time.perf_counter() - t0)))
+    return True
 
 
 def cmd_teach(a):
@@ -135,57 +206,7 @@ def cmd_teach(a):
                 return
             A.go_to(arm, leader.get_action(), 2.0)  # ease to the leader instead of snapping there
             print("\nMove the LEADER and watch the FOLLOWER. Enter saves the follower's pose.")
-        print("(b + Enter = back, s + Enter = skip, q + Enter = quit)")
-        i, shown, blocked_since = 0, -1, None
-        while i < len(steps):
-            t0 = time.perf_counter()
-            if shown != i:
-                taught = " (already taught, Enter overwrites)" if steps[i] in A.load_poses() else ""
-                print(f"\nSTEP {i + 1}/{len(steps)}  {steps[i]}: {hint(steps[i])}{taught}", flush=True)
-                shown = i
-            cmd = None
-            if leader:
-                cmd = leader.get_action()
-                try:
-                    arm.send_action({k: cmd[k] for k in A.KEYS})
-                    have = A.read_pose(arm)
-                except (RuntimeError, ConnectionError) as e:
-                    print(f"\nA motor reported a problem ({e}). Stopping - something may block the arm.")
-                    break
-                stuck = [k for k in A.KEYS if k != "gripper.pos" and gap(k, cmd[k], have[k]) > BLOCKED_DIFF]
-                blocked_since = None if not stuck else (blocked_since or time.time())
-                if blocked_since and time.time() - blocked_since > BLOCKED_SECONDS:
-                    print(f"\nThe follower cannot reach the leader's pose ({', '.join(k[:-4] for k in stuck)}): "
-                          "something blocks it. Stopping to protect the motors.")
-                    break
-            try:
-                line = typed.get_nowait()
-            except queue.Empty:
-                line = None
-            if line == "q":
-                break
-            if line == "b":
-                i = max(0, i - 1)
-            elif line == "s":
-                print(f"   skipped {steps[i]}")
-                i += 1
-            elif line is not None:
-                pose = A.read_pose(arm)
-                if cmd and steps[i].startswith("grip_"):
-                    # keep the leader's squeeze: the follower's gripper is stopped by the cup, the command is not
-                    pose["gripper.pos"] = cmd["gripper.pos"]
-                elif a.hand and steps[i].startswith("grip_"):
-                    # by hand the jaws only touch the cup; command a bit further closed so they squeeze
-                    pose["gripper.pos"] = max(0.0, pose["gripper.pos"] - HAND_SQUEEZE)
-                A.save_pose(steps[i], pose)
-                print(f"   saved {steps[i]}: " + " ".join(f"{k[:-4]}={v:.1f}" for k, v in pose.items()))
-                kind, _, slot = steps[i].partition("_")
-                above = A.load_poses().get(f"above_{slot}")
-                if kind in ("grip", "in", "lift") and above and abs(pose["shoulder_pan.pos"] - above["shoulder_pan.pos"]) > 12:
-                    print(f"   CHECK: base rotation differs {pose['shoulder_pan.pos'] - above['shoulder_pan.pos']:+.0f} deg "
-                          f"from above_{slot}. Same slot = almost the same rotation. Type b + Enter to redo.")
-                i += 1
-            time.sleep(max(0.0, 1 / A.FPS - (time.perf_counter() - t0)))
+        follow_steps(arm, leader, typed, steps, lambda n: A.load_poses().get(n), A.save_pose, a.hand)
         missing = [n for n in required() if n not in A.load_poses()]
         print("\nDone." + (f" Still missing: {', '.join(missing)}" if missing else " All poses taught."))
     finally:
@@ -196,6 +217,123 @@ def cmd_teach(a):
             arm.disconnect()
         else:
             A.release(arm)
+
+
+# ---------------------------------------------------------------- v2: reach samples (camera-guided grabbing)
+
+def load_samples() -> list[dict]:
+    return json.loads(SAMPLES_FILE.read_text(encoding="utf-8")) if SAMPLES_FILE.exists() else []
+
+
+def save_samples(samples: list[dict]) -> None:
+    SAMPLES_FILE.write_text(json.dumps(samples, indent=1), encoding="utf-8")
+
+
+def see_one_cup(a, setup, typed: queue.Queue):
+    """Camera (or --image) until exactly one cup is seen. Returns (uv, frame_size) or None (q)."""
+    import vision as V
+    while True:
+        if a.fake and not a.image:  # no camera at all: pretend a cup somewhere on the table
+            return (random.uniform(150, 490), random.uniform(250, 400)), [640, 480]
+        if a.image:
+            frame = cv2.imread(a.image)
+            if frame is None:
+                sys.exit(f"Cannot read image {a.image}")
+        else:
+            import selfcheck
+            c = selfcheck.camera_cfg()
+            frame = selfcheck.grab_frame(c["index"], c["width"], c["height"])
+        cups = V.find_cups(frame, setup)
+        if len(cups) == 1:
+            break
+        print(f"\nThe camera sees {len(cups)} cups" + "".join(
+            f"\n  cup at ({c['uv'][0]:.0f}, {c['uv'][1]:.0f}), {c['px']} px" for c in cups))
+        print("Put exactly ONE cup on the table (nothing else cup-coloured in view), then Enter = look again. (q = quit)")
+        if typed.get() == "q":
+            return None
+    uv, size = tuple(round(x, 1) for x in cups[0]["uv"]), [frame.shape[1], frame.shape[0]]
+    if not a.fake:
+        win = "teach sample: the robot sees"
+        cv2.imshow(win, V.draw_cups(frame, cups))
+        cv2.waitKey(1000)
+        cv2.destroyWindow(win)
+    return uv, size
+
+
+def cmd_sample(a):
+    import motions as M
+    import vision as V
+    ready = A.load_poses().get("ready") or (M.fake_poses()["ready"] if a.fake else None)
+    if not ready:
+        sys.exit("No 'ready' pose yet. Run: teach.py teach --only ready")
+    setup = None if a.fake and not a.image else V.load_setup(Path(a.setup) if a.setup else None)
+    arm = A.connect(fake=a.fake)
+    leader = None
+    typed = stdin_lines()
+    try:
+        if not a.hand:
+            leader = connect_leader(a.fake)
+        for n in range(a.count):
+            if n:
+                print("\nMove the cup to a NEW place (spread samples over the whole cup area), then Enter. (q = quit)")
+                if typed.get() == "q":
+                    break
+            torque(arm, True)
+            A.go_to(arm, ready, 3.0)  # high and out of the camera's view
+            seen = see_one_cup(a, setup, typed)
+            if seen is None:
+                break
+            uv, size = seen
+            print(f"\nCup seen at u={uv[0]:.0f}, v={uv[1]:.0f}. Now teach the 4 poses for THIS cup.")
+            if leader:
+                if a.fake:
+                    leader.pose = A.read_pose(arm)
+                if not match_start_pose(arm, leader, typed, limp=False):
+                    break
+                A.go_to(arm, leader.get_action(), 2.0)
+                print("Move the LEADER and watch the FOLLOWER. Enter saves the follower's pose.")
+            else:
+                print("HAND mode: hold the follower, Enter = motors OFF. (q = quit)")
+                if typed.get() == "q":
+                    break
+                torque(arm, False)
+            got: dict[str, dict] = {}
+            done = follow_steps(arm, leader, typed, list(KINDS), got.get,
+                                lambda k, p: got.__setitem__(k, {j: round(float(p[j]), 2) for j in A.KEYS}), a.hand)
+            torque(arm, True)
+            if len(got) == len(KINDS):
+                samples = load_samples() + [{"uv": list(uv), "frame_size": size, "poses": got}]
+                save_samples(samples)
+                print(f"\nsample {len(samples)} saved at {uv[0]:.0f},{uv[1]:.0f}; move the cup to a new place and run "
+                      "sample again (6-8 samples spread over the whole cup area)")
+            else:
+                print(f"\nsample NOT saved (missing {', '.join(k for k in KINDS if k not in got)})")
+            if "grip" in got and "above" in got:  # put the cup down, let go, back up
+                o = got["above"]["gripper.pos"]
+                A.go_to(arm, got["grip"], 1.5)
+                A.go_to(arm, A.with_gripper(got["grip"], o), 0.7)
+                A.go_to(arm, got["above"], 1.0)
+            if not done:
+                break
+        print(f"\n{len(load_samples())} samples in {SAMPLES_FILE.name}. Next: reach.py check")
+    finally:
+        if leader:
+            leader.disconnect()
+        A.release(arm)
+
+
+def cmd_samples(a):
+    samples = load_samples()
+    if a.drop is not None:
+        if not 1 <= a.drop <= len(samples):
+            sys.exit(f"no sample {a.drop} (have {len(samples)})")
+        samples.pop(a.drop - 1)
+        save_samples(samples)
+        print(f"dropped sample {a.drop}")
+    for n, smp in enumerate(samples, 1):
+        print(f"{n:3d}  u={smp['uv'][0]:6.1f} v={smp['uv'][1]:6.1f}  frame {smp.get('frame_size')}  "
+              f"poses {','.join(smp['poses'])}")
+    print(f"{len(samples)} samples in {SAMPLES_FILE.name}")
 
 
 def cmd_list(a):
@@ -305,12 +443,25 @@ def main():
     s.add_argument("dst", type=int, choices=[1, 2, 3, 4])
     s.add_argument("--pan", type=float, required=True, help="base rotation (shoulder_pan) for the new slot")
     s.set_defaults(fn=cmd_copy_slot)
+    s = sub.add_parser("sample", help="v2: camera sees ONE cup, teach above/grip/in/lift for it (reach_samples.json)")
+    s.add_argument("--count", type=int, default=1, help="samples in one run (move the cup between them)")
+    s.add_argument("--hand", action="store_true", help="no leader: follower torque off, move it by hand")
+    s.add_argument("--image", help="use a saved image instead of the camera (testing)")
+    s.add_argument("--setup", help="vision setup file (default shellgame/vision_setup.json)")
+    s.set_defaults(fn=cmd_sample)
+    s = sub.add_parser("samples", help="list reach samples, --drop N deletes one")
+    s.add_argument("--drop", type=int, help="1-based sample number to delete")
+    s.set_defaults(fn=cmd_samples)
     for s in sub.choices.values():  # --fake also accepted after the sub-command
         s.add_argument("--fake", action="store_true", default=argparse.SUPPRESS)
     a = p.parse_args()
-    if a.fake and (a.cmd == "teach" or not A.POSES_FILE.exists()):
+    if a.fake and (a.cmd in ("teach", "sample") or not A.POSES_FILE.exists()):
         A.POSES_FILE = FAKE_POSES  # fake teaching never overwrites the real poses.json
         print(f"(fake: using {FAKE_POSES.name})")
+    if a.fake and a.cmd in ("sample", "samples"):
+        global SAMPLES_FILE
+        SAMPLES_FILE = SAMPLES_FILE.with_name("reach_samples_fake.json")  # nor the real reach samples
+        print(f"(fake: using {SAMPLES_FILE.name})")
     try:
         a.fn(a)
     except KeyboardInterrupt:
