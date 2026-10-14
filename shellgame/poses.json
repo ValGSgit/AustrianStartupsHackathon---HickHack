@@ -40,7 +40,7 @@
     "gripper.pos": 17.84
   },
   "lift_1": {
-    "shoulder_pan.pos": -84.05,
+    "shoulder_pan.pos": -72.0,
     "shoulder_lift.pos": -66.07,
     "elbow_flex.pos": 27.43,
     "wrist_flex.pos": 58.15,
@@ -72,7 +72,7 @@
     "gripper.pos": 17.84
   },
   "lift_2": {
-    "shoulder_pan.pos": -36.05,
+    "shoulder_pan.pos": -24.0,
     "shoulder_lift.pos": -66.07,
     "elbow_flex.pos": 27.43,
     "wrist_flex.pos": 58.15,
@@ -104,7 +104,7 @@
     "gripper.pos": 17.84
   },
   "lift_3": {
-    "shoulder_pan.pos": 11.95,
+    "shoulder_pan.pos": 24.0,
     "shoulder_lift.pos": -66.07,
     "elbow_flex.pos": 27.43,
     "wrist_flex.pos": 58.15,
@@ -136,7 +136,7 @@
     "gripper.pos": 17.84
   },
   "lift_4": {
-    "shoulder_pan.pos": 59.95,
+    "shoulder_pan.pos": 72.0,
     "shoulder_lift.pos": -66.07,
     "elbow_flex.pos": 27.43,
     "wrist_flex.pos": 58.15,
