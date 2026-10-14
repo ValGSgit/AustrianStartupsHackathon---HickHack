@@ -186,7 +186,7 @@ def cmd_positions(a):
     for label, d in devices:
         d.connect(calibrate=False)
         if not d.is_calibrated:
-            sys.exit(f"{label} is not calibrated (no calibration/{CONFIG[label]['id']}.json) - run: robot.py calibrate {label}")
+            sys.exit(f"{label}: motors don't match calibration/{CONFIG[label]['id']}.json - run: robot.py restore-calibration {label}")
     names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
     print("            " + " ".join(f"{n[:12]:>13}" for n in names))
     try:
@@ -204,6 +204,96 @@ def cmd_positions(a):
             d.disconnect()
 
 
+def _arm(label: str):
+    """SO101 follower/leader object for config.toml's port + id, with calibration/<id>.json loaded (not connected)."""
+    c = CONFIG[label]
+    if label == "follower":
+        from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+
+        return SO101Follower(SO101FollowerConfig(port=c["port"], id=c["id"], calibration_dir=CALIB_DIR))
+    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+    return SO101Leader(SO101LeaderConfig(port=c["port"], id=c["id"], calibration_dir=CALIB_DIR))
+
+
+def sync_calibration(label: str, write: bool, force: bool = False) -> bool:
+    """Make the motors use calibration/<id>.json again. True if they match (already, or after writing).
+
+    Every calibration (ours, another team's, arman/calibrate.py) is stored IN the motors (homing offset + limits).
+    After someone else recalibrated, lerobot-* asks "Press ENTER to use provided calibration file" on connect,
+    which hangs piped/background runs (agent, stage). Writing our file back restores the exact joint mapping our
+    dataset and policy use, as long as the motors were not physically re-mounted (checked via the end stops).
+    """
+    dev = _arm(label)
+    if not dev.calibration:
+        sys.exit(f"no calibration/{CONFIG[label]['id']}.json - calibrate the {label} first")
+    bus = dev.bus
+    bus.connect()
+    try:
+        motors, ours = bus.read_calibration(), dev.calibration
+        diff = [m for m in ours if (ours[m].homing_offset, ours[m].range_min, ours[m].range_max)
+                != (motors[m].homing_offset, motors[m].range_min, motors[m].range_max)]
+        if not diff:
+            print(f"{label}: motors match calibration/{dev.id}.json")
+            return True
+        # Present = Actual - Homing_Offset, so range + offset is the end stop in raw encoder ticks: the same for
+        # any recalibration of the same physical joint (within sweep accuracy), whatever the middle pose was.
+        print(f"{label}: motors hold a DIFFERENT calibration (someone else calibrated this arm)")
+        print(f"  {'joint':14} {'file off/min/max':>20} {'motors off/min/max':>20} {'end-stop shift':>15}")
+        worst = 0
+        for m in diff:
+            o, n = ours[m], motors[m]
+            shift = max(abs((o.range_min + o.homing_offset - n.range_min - n.homing_offset + 2048) % 4096 - 2048),
+                        abs((o.range_max + o.homing_offset - n.range_max - n.homing_offset + 2048) % 4096 - 2048))
+            if m != "wrist_roll":  # full-turn joint: no end stops to compare
+                worst = max(worst, shift)
+            print(f"  {m:14} {o.homing_offset:6}/{o.range_min:5}/{o.range_max:5}  "
+                  f"{n.homing_offset:6}/{n.range_min:5}/{n.range_max:5}  {shift:12} ticks")
+        if worst > 200 and not force:
+            print(f"  end stops moved up to {worst} ticks (~{worst * 360 // 4096} deg): a different arm or a re-mounted "
+                  f"motor horn? Check the COM port. If it is our arm, re-run with --force, then compare the rest "
+                  f"pose with `robot.py positions --follower`.")
+            return False
+        if not write:
+            print(f"  -> fix: robot.py restore-calibration {label}")
+            return False
+        # EEPROM writes need torque off (disable_torque also unlocks). The arm must rest on the table.
+        bus.disable_torque()
+        bus.write_calibration(ours)
+        # The goal register is in the old frame; set it to where the arm is now so the next torque-on can't jump.
+        bus.sync_write("Goal_Position", bus.sync_read("Present_Position", normalize=False), normalize=False)
+        ok = bus.is_calibrated
+        print(f"{label}: wrote calibration/{dev.id}.json to the motors -> " + ("OK" if ok else "STILL DIFFERENT"))
+        return ok
+    finally:
+        bus.disconnect(disable_torque=False)
+
+
+def ensure_calibration(labels: tuple[str, ...]) -> None:
+    """Before a lerobot-* run: fail with a clear fix instead of lerobot's interactive calibration prompt."""
+    if DRY_RUN or os.environ.get("ROBOT_SKIP_CALIB_CHECK") == "1":
+        return
+    bad = []
+    for label in labels:
+        try:
+            if not sync_calibration(label, write=False):
+                bad.append(label)
+        except Exception as e:  # port busy / arm unpowered: let lerobot report it the usual way
+            print(f"{label}: calibration check skipped ({type(e).__name__}: {e})")
+    if bad:
+        sys.exit(f"Run: robot.py restore-calibration {' '.join(bad)}   (arm resting on the table)")
+
+
+def cmd_restore_calibration(a):
+    if not a.check:
+        print("Arm(s) must REST on the table: torque is switched off while writing (the arm goes limp).")
+    ok = all([sync_calibration(label, write=not a.check, force=a.force) for label in a.arms or ["follower", "leader"]])
+    if ok and not a.check:
+        print("Done. Proof it reached EEPROM: power-cycle the arm, then `robot.py restore-calibration --check` "
+              "(should say 'match'). Then `robot.py positions --follower` at the rest pose.")
+    sys.exit(0 if ok else 1)
+
+
 def cmd_calibrate(a):
     if a.arm == "follower":
         run("lerobot-calibrate", *robot_args(with_cameras=False))
@@ -212,6 +302,7 @@ def cmd_calibrate(a):
 
 
 def cmd_teleop(a):
+    ensure_calibration(("follower", "leader"))
     run(
         "lerobot-teleoperate",
         *robot_args(with_cameras=not a.no_cameras),
@@ -228,6 +319,7 @@ def cmd_record(a):
             f"{root} already exists. Use --resume to add episodes "
             f"(--episodes = how many MORE to record), or delete the folder to start over."
         )
+    ensure_calibration(("follower", "leader"))
     t = CONFIG["task"]
     run(
         "lerobot-record",
@@ -249,6 +341,7 @@ def cmd_record(a):
 
 def cmd_replay(a):
     name = a.dataset or CONFIG["hf"]["dataset"]
+    ensure_calibration(("follower",))
     run(
         "lerobot-replay",
         *robot_args(with_cameras=False),
@@ -355,6 +448,7 @@ def cmd_rollout(a):
         extra.append("--inference.type=rtc")
         if any(k.startswith("observation.images.camera") for k in pc.get("input_features", {})):
             extra.append(f"--rename_map={smolvla_rename_map()}")
+    ensure_calibration(("follower",))
     run(
         "lerobot-rollout",
         "--strategy.type=base",
@@ -387,6 +481,13 @@ def main():
     s = sub.add_parser("calibrate", help="calibrate an arm (once per arm, per laptop)")
     s.add_argument("arm", choices=["follower", "leader"])
     s.set_defaults(fn=cmd_calibrate)
+
+    s = sub.add_parser("restore-calibration",
+                       help="write calibration/*.json back into the motors (after another team calibrated the arm)")
+    s.add_argument("arms", nargs="*", choices=["follower", "leader"], help="default: both")
+    s.add_argument("--check", action="store_true", help="only compare, write nothing")
+    s.add_argument("--force", action="store_true", help="write even if the end stops moved a lot")
+    s.set_defaults(fn=cmd_restore_calibration)
 
     s = sub.add_parser("positions", help="print joint values in LeRobot units (check calibration / directions)")
     s.add_argument("--follower", action="store_true", help="also read the follower (it keeps holding its pose)")

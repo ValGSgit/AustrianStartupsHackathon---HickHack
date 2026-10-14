@@ -173,6 +173,8 @@ def check_now(setup: dict):
 def cmd_demo(a):
     setup = selfcheck.load_setup()
     policy = "mock" if a.mock else resolve_policy(a.policy)
+    if not a.mock:
+        robot.ensure_calibration(("follower",))  # not lerobot's ENTER prompt in the middle of the show
     cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble, a.mock)
     react = reactivity_label(a.n_action_steps, a.ensemble)
     print(f"policy {policy}\nreactivity {react}")
@@ -209,6 +211,8 @@ def cmd_demo(a):
 def cmd_eval(a):
     setup = selfcheck.load_setup()
     policy = "mock" if a.mock else resolve_policy(a.policy)
+    if not a.mock:
+        robot.ensure_calibration(("follower",))  # not lerobot's ENTER prompt in the middle of the show
     cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble, a.mock)
     react = reactivity_label(a.n_action_steps, a.ensemble)
     label = a.label

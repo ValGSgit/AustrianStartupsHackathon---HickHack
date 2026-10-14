@@ -253,7 +253,7 @@ class RealBackend(Backend):
         if not robot.calibration:
             self.log(f"arm on {f['port']}: no calibration/{f['id']}.json - run robot.py calibrate follower")
         elif not self.calibrated:
-            self.log(f"arm on {f['port']}: calibration file does not match the motors - recalibrate")
+            self.log(f"arm on {f['port']}: motors hold another calibration - run robot.py restore-calibration")
         else:
             self.log(f"arm connected on {f['port']} (read-only: positions, torque untouched)")
 
@@ -326,7 +326,9 @@ class RealBackend(Backend):
             self.report_hw()
         print(">", " ".join(cmd), flush=True)
         self.log("run: " + " ".join(cmd[1:]))
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        # stdin closed: a lerobot input() prompt (e.g. calibration mismatch) fails in the log instead of hanging
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True,
                                      encoding="utf-8", errors="replace",
                                      env={**os.environ, "PYTHONUTF8": "1", "ROBOT_LIVE": "1"})
         t0, last = time.perf_counter(), 0.0
@@ -357,8 +359,13 @@ class RealBackend(Backend):
         return code == 0, f"{skill} finished (exit {code})"
 
     def on_stop(self):
+        # e-stop is still the follower's power plug
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()  # e-stop is still the follower's power plug
+            if sys.platform == "win32":
+                # robot.py runs lerobot-rollout as ITS child; terminate() would kill only robot.py and the arm keeps going
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True)
+            else:
+                self.proc.terminate()
 
 
 class SimBackend(Backend):
@@ -534,6 +541,7 @@ async def main_async(a) -> None:
             reason = ws.close_reason or ""
             if "replaced" in reason:  # another laptop connected as the robot: don't fight over the connection
                 print(f"disconnected: {reason}. Only one robot agent can be connected - exiting.", flush=True)
+                backend.on_stop()  # nobody could STOP a skill still running here
                 return
             print(f"connection closed ({ws.close_code} {reason}) - reconnecting in 3 s", flush=True)
         except Exception as e:

@@ -66,6 +66,22 @@ Then follow **Install** in the [README](../README.md) (Python 3.12 venv, CUDA to
 
 > The arms come assembled, so **never run `setup-motors`**. It rewrites the motor ids and breaks the daisy chain.
 
+### Getting the arm back from another team (shared arm)
+
+A calibration lives **inside the motors**, so whoever calibrated last wins. That includes other teams and
+`arman/calibrate.py`. Our `calibration/*.json` is still right; it just has to be written back.
+**Don't recalibrate**: that changes the joint mapping, and recordings and policies stop matching.
+
+```powershell
+.venv\Scripts\python robot.py restore-calibration --check   # compare motors vs calibration/*.json, writes nothing
+.venv\Scripts\python robot.py restore-calibration           # arms RESTING on the table: writes our files back
+.venv\Scripts\python robot.py positions --follower          # rest pose should read like before (step 4)
+```
+
+`teleop`, `record`, `replay`, `rollout` and `stage.py` run this check first. On a mismatch they stop with the
+fix, instead of hanging on lerobot's "Press ENTER to use provided calibration file" prompt.
+If the restore reports a large **end-stop shift**, it's a different arm or a re-mounted motor. Check the COM port first.
+
 ## 3. Calibrate both arms, then commit
 
 ```powershell
