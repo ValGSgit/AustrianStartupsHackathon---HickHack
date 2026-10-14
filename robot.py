@@ -286,7 +286,8 @@ def ensure_calibration(labels: tuple[str, ...]) -> None:
 
 def cmd_restore_calibration(a):
     if not a.check:
-        print("Arm(s) must REST on the table: torque is switched off while writing (the arm goes limp).")
+        # torque goes off only for arms that differ, but a raised follower would drop onto the table
+        input("Torque is switched off while writing (the arm goes limp). Put the arm(s) in the REST pose, then ENTER...")
     ok = all([sync_calibration(label, write=not a.check, force=a.force) for label in a.arms or ["follower", "leader"]])
     if ok and not a.check:
         print("Done. Proof it reached EEPROM: power-cycle the arm, then `robot.py restore-calibration --check` "
