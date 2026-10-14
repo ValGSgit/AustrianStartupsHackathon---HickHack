@@ -179,6 +179,11 @@ def cmd_teach(a):
                     pose["gripper.pos"] = max(0.0, pose["gripper.pos"] - HAND_SQUEEZE)
                 A.save_pose(steps[i], pose)
                 print(f"   saved {steps[i]}: " + " ".join(f"{k[:-4]}={v:.1f}" for k, v in pose.items()))
+                kind, _, slot = steps[i].partition("_")
+                above = A.load_poses().get(f"above_{slot}")
+                if kind in ("grip", "in", "lift") and above and abs(pose["shoulder_pan.pos"] - above["shoulder_pan.pos"]) > 12:
+                    print(f"   CHECK: base rotation differs {pose['shoulder_pan.pos'] - above['shoulder_pan.pos']:+.0f} deg "
+                          f"from above_{slot}. Same slot = almost the same rotation. Type b + Enter to redo.")
                 i += 1
             time.sleep(max(0.0, 1 / A.FPS - (time.perf_counter() - t0)))
         missing = [n for n in required() if n not in A.load_poses()]

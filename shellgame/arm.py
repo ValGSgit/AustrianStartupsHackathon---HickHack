@@ -9,9 +9,14 @@ so poses taught here stay valid for teleop/record and the other way round.
 """
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
+
+# LeRobot logs a multi-line warning on every step that max_relative_target slows down. Harmless, but it buries
+# the instructions on screen.
+logging.getLogger().addFilter(lambda r: "Relative goal position magnitude" not in str(r.msg))
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
