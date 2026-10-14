@@ -1,0 +1,20 @@
+# Copy to config.local.toml (gitignored) and keep only what differs on YOUR laptop.
+# Values here override config.toml, so teammates never fight over ports or GPU settings.
+
+# [follower]
+# port = "COM5"
+
+# [leader]
+# port = "COM6"
+
+# [cameras.front]
+# index = 1
+
+# RTX 3060 Laptop (6 GB), measured 2026-10-14 on lerobot/svla_so101_pickplace (2 cameras, ACT, 200 steps):
+#   batch 8,  AMP off: 0.30 s/step, 3.7 GB
+#   batch 8,  AMP on:  0.26 s/step, 3.6 GB   <- 2 cameras: use this
+#   batch 16, AMP on:  4.35 s/step, 6.4 GB   spills into system RAM, 16x slower
+# 1 camera needs roughly half the memory: batch 8 is safe; check mem_gb < 5.5 before trying 16.
+# [train]
+# use_amp = true
+# batch_size = 8

@@ -30,6 +30,9 @@ python -m uv pip install --python .venv\Scripts\python.exe "lerobot[core-scripts
 # torchcodec can't find FFmpeg DLLs on Windows and floods every command with errors.
 # Without it LeRobot quietly uses pyav (bundled FFmpeg) - verified to record + decode fine.
 python -m uv pip uninstall --python .venv\Scripts\python.exe torchcodec
+# lerobot ships headless OpenCV (no windows). stage.py / selfcheck.py need the GUI build, same version.
+python -m uv pip uninstall --python .venv\Scripts\python.exe opencv-python-headless
+python -m uv pip install --python .venv\Scripts\python.exe opencv-python==4.13.0.92
 # sim + Cloudflare agent extras
 python -m uv pip install --python .venv\Scripts\python.exe mujoco==3.3.7 websockets==15.0.1 trimesh==4.8.3 fast-simplification==0.1.11
 .venv\Scripts\python robot.py check        # expect cuda=True and your GPU
@@ -100,6 +103,21 @@ Stop the run, lower `batch_size` in `config.toml`, and start again with a new `-
 Use the same camera, the same position and the same lighting as when you recorded.
 
 **Stage fallback:** `robot.py replay --episode N` replays a good recorded demo exactly.
+
+## 6. Stage demo, self-check and evaluation
+
+See [docs/stage_demo.md](docs/stage_demo.md): the disturbance-recovery demo, the recording protocol for it,
+and the tools that wrap rollout:
+
+```powershell
+.venv\Scripts\python selfcheck.py setup            # mark the box + cube colour once the camera is taped
+.venv\Scripts\python stage.py eval --label 10k --policy <checkpoint>   # 20-position protocol -> evals/eval_log.csv
+.venv\Scripts\python stage.py report               # success rate per checkpoint and reactivity setting
+.venv\Scripts\python stage.py demo --fullscreen    # attempt -> camera check -> retry, big status screen
+```
+
+**Per-laptop settings:** copy `config.local.example.toml` to `config.local.toml` (gitignored). It overrides
+`config.toml`, so COM ports, camera index and GPU settings differ per laptop without merge conflicts.
 
 ## GPU benchmark
 

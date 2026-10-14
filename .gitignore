@@ -6,4 +6,5 @@ scratch_*/
 wandb/
 *.mp4
 *.log
+config.local.toml
 sim/model/
