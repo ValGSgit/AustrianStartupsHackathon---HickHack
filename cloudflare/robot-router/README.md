@@ -15,9 +15,14 @@ browser dashboard ──/api/command──► Worker ──► Workers AI: Whisp
 
 * The LLM can **only** pick a skill name from the list the agent announced (JSON-schema `enum`), or `none`.
   Confidence < 0.6 → the dashboard asks for confirmation. A busy robot rejects new commands.
-* The camera frames that steer the arm never leave the laptop. Cloudflare gets **one snapshot per command**
-  (scene check) and one after the skill (vision "did it work?" check).
-* Every `/api` route needs the shared secret `ROBOT_TOKEN` (`Authorization: Bearer …`, agent: `?token=`).
+* The policy runs on the laptop; Cloudflare gets **one snapshot per command** (scene check) and one after the
+  skill (vision "did it work?" check).
+* **Live panel** (dashboard WebSocket `/api/live`): every pipeline stage is logged as it happens (heard →
+  camera → vision → router → guardrail → run → policy inference → result → vision check). While a sim skill
+  runs, the agent also streams ~8 Hz 320×240 frames with the 6 joint positions and the targets the policy
+  commands, which the dashboard draws as bars. On the real arm only the log streams for now (lerobot holds the
+  camera during a rollout). The log lives in the Durable Object's memory, so it starts empty after it hibernates.
+* Every `/api` route needs the shared secret `ROBOT_TOKEN` (`Authorization: Bearer …`, agent and live view: `?token=`).
 
 ## Models
 

@@ -1,6 +1,7 @@
 // robot-router Worker: voice/text instruction -> Workers AI -> one of the robot's trained skills.
 //
 //   GET  /api/agent          WebSocket for the laptop agent (host/robot_agent.py)
+//   GET  /api/live           WebSocket for dashboards: live camera frames, joint targets, pipeline log
 //   GET  /api/state          robot + last command / result
 //   GET  /api/image/:kind    before | after snapshot (JPEG)
 //   POST /api/command        {text} or {audio: base64 wav}  -> transcribe, look, route, guard, run
@@ -34,7 +35,7 @@ export default {
 
     const robot = env.ROBOT.get(env.ROBOT.idFromName("so101"));
 
-    if (url.pathname === "/api/agent") return robot.fetch(req);
+    if (url.pathname === "/api/agent" || url.pathname === "/api/live") return robot.fetch(req);
     if (url.pathname === "/api/state" && req.method === "GET") return json(await robot.getState());
 
     const img = url.pathname.match(/^\/api\/image\/(before|after)$/);
@@ -68,24 +69,44 @@ async function handleCommand(
 ): Promise<CommandLog & { snapshot: boolean }> {
   const log: CommandLog = { at: new Date().toISOString(), transcript: "", scene: "", decision: null, action: "error" };
   let snapshot = false;
+  const since = (t: number) => `${Date.now() - t} ms`;
   try {
     // 1. what was said
-    log.transcript = body.audio ? await transcribe(env.AI, body.audio) : (body.text ?? "").trim();
+    let t = Date.now();
+    if (body.audio) {
+      await robot.log("heard", "audio received, transcribing with Whisper large-v3-turbo…");
+      log.transcript = await transcribe(env.AI, body.audio);
+      await robot.log("heard", `"${log.transcript}" (${since(t)})`);
+    } else {
+      log.transcript = (body.text ?? "").trim();
+      await robot.log("heard", `typed: "${log.transcript}"`);
+    }
     if (!log.transcript) throw new Error("empty instruction");
 
     const state = await robot.getState();
     if (!state.agentConnected) {
       log.action = "no_agent";
+      await robot.log("error", "no robot agent connected - nothing to run");
       return { ...log, snapshot };
     }
 
     // 2. what the camera sees (one frame, same camera the policy uses)
+    t = Date.now();
     const jpeg = await robot.snapshot(5000);
     snapshot = !!jpeg;
-    if (jpeg) log.scene = await describeScene(env.AI, jpeg).catch((e) => `(vision failed: ${e})`);
+    await robot.log("camera", jpeg ? `snapshot from the robot camera (${since(t)})` : "no camera frame (timeout)");
+    if (jpeg) {
+      t = Date.now();
+      log.scene = await describeScene(env.AI, jpeg, state.mode).catch((e) => `(vision failed: ${e})`);
+      await robot.log("vision", `Mistral Small 3.1 sees: ${log.scene} (${since(t)})`);
+    }
 
     // 3. which skill - the LLM can only pick from the agent's list
+    t = Date.now();
+    await robot.log("router", `Llama 3.3 70B picks one of [${state.skills.map((s) => s.name).join(", ")}, none]…`);
     log.decision = await route(env.AI, log.transcript, state.skills, log.scene);
+    const pct = (log.decision.confidence * 100).toFixed(0);
+    await robot.log("router", `-> ${log.decision.policy} (confidence ${pct}%) "${log.decision.say}" (${since(t)})`);
 
     // 4. guardrails, in code rather than in the prompt
     if (log.decision.policy === "none") log.action = "none";
@@ -95,9 +116,18 @@ async function handleCommand(
       log.action = r.ok ? "started" : r.reason.startsWith("busy") ? "busy" : "error";
       if (!r.ok) log.error = r.reason;
     }
+    const guard: Record<string, string> = {
+      none: "no matching skill - nothing runs",
+      needs_confirm: `confidence below ${CONFIDENCE_MIN * 100}% - waiting for a human to confirm`,
+      started: `confidence >= ${CONFIDENCE_MIN * 100}% - running it`,
+      busy: `robot is busy - ${log.error}`,
+      error: `could not start - ${log.error}`,
+    };
+    await robot.log("guard", guard[log.action] ?? log.action);
   } catch (e) {
     log.action = "error";
     log.error = String(e);
+    await robot.log("error", log.error);
   }
   await robot.logCommand(log);
   return { ...log, snapshot };

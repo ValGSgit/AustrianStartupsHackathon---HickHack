@@ -45,7 +45,29 @@
   .skills button { text-align: left; }
   .skills small { display: block; color: var(--muted); font-size: 12px; }
   .hidden { display: none; }
-  @media (max-width: 620px) { .imgs { grid-template-columns: 1fr; } .kv { grid-template-columns: 90px 1fr; } }
+  .live { display: grid; grid-template-columns: 1.15fr 1fr; gap: 14px; align-items: start; }
+  .cam { position: relative; } .cam img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; background: var(--chip); display: block; }
+  .cam .badge { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font: 12px ui-monospace, Consolas, monospace;
+    padding: 2px 8px; border-radius: 99px; }
+  .joint { display: grid; grid-template-columns: 96px 1fr 92px; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 9px; }
+  .joint .name { color: var(--muted); }
+  .joint .num { font: 12px ui-monospace, Consolas, monospace; text-align: right; white-space: nowrap; }
+  .track { position: relative; height: 12px; border-radius: 99px; background: var(--chip); }
+  .track .zero { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .track .state { position: absolute; top: 1px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--ink); transition: left .12s linear; }
+  .track .target { position: absolute; top: -3px; width: 3px; height: 18px; margin-left: -1.5px; border-radius: 2px; background: var(--accent); transition: left .12s linear; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .legend i { display: inline-block; vertical-align: middle; margin: 0 4px 0 10px; }
+  .legend i.s { width: 9px; height: 9px; border-radius: 50%; background: var(--ink); } .legend i.t { width: 3px; height: 13px; background: var(--accent); }
+  .log { margin-top: 12px; height: 280px; overflow-y: auto; font: 12.5px/1.5 ui-monospace, Consolas, monospace; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .log div { display: grid; grid-template-columns: 74px 64px 1fr; gap: 8px; }
+  .log .at { color: var(--muted); } .log .k { font-weight: 600; } .log .x { overflow-wrap: anywhere; }
+  .k.heard, .k.camera { color: #3b82c4; } .k.vision { color: #8a5cc4; } .k.router, .k.guard { color: var(--warn); }
+  .k.run, .k.agent, .k.joints { color: var(--ok); } .k.done, .k.verify { color: var(--ink); } .k.error, .k.stop { color: var(--bad); }
+  .k.conn { color: var(--muted); }
+  @media (max-width: 620px) { .imgs { grid-template-columns: 1fr; } .kv { grid-template-columns: 90px 1fr; } .live { grid-template-columns: 1fr; }
+    .log div { grid-template-columns: 64px 1fr; } .log .k { display: none; } }
 </style>
 </head>
 <body>
@@ -72,6 +94,18 @@
       <button id="mic" type="button" title="Hold to talk">🎙 Talk</button>
       <button class="primary" type="submit">Send</button>
     </form>
+  </section>
+
+  <section class="panel">
+    <div class="label">Live: what the robot sees and how it moves</div>
+    <div class="live">
+      <div class="cam"><img id="liveImg" alt=""><span id="liveBadge" class="badge">waiting for frames…</span></div>
+      <div>
+        <div id="joints"></div>
+        <div class="legend"><i class="s"></i>current joint position<i class="t"></i>target the policy commands</div>
+      </div>
+    </div>
+    <div id="log" class="log"></div>
   </section>
 
   <section class="panel">
@@ -113,7 +147,7 @@ async function api(path, body) {
   return r;
 }
 
-$("saveToken").onclick = () => { token = $("token").value.trim(); try { localStorage.setItem("robotToken", token); } catch {} $("auth").classList.add("hidden"); poll(); };
+$("saveToken").onclick = () => { token = $("token").value.trim(); try { localStorage.setItem("robotToken", token); } catch {} $("auth").classList.add("hidden"); poll(); if (live) live.close(); else connectLive(); };
 $("token").onkeydown = (e) => { if (e.key === "Enter") $("saveToken").click(); };
 $("stop").onclick = async () => {
   try { const s = await (await api("/api/stop", {})).json(); $("statusText").textContent = s.sent ? "stop sent" : "stop: no robot agent connected"; }
@@ -169,6 +203,63 @@ async function poll() {
   } catch (e) { $("statusText").textContent = String(e.message || e); }
 }
 setInterval(poll, 1500); poll();
+
+// --- live view: camera frames + joint state/targets + pipeline log, pushed over a WebSocket by the Durable Object
+const JOINT_LABELS = { shoulder_pan: "shoulder pan", shoulder_lift: "shoulder lift", elbow_flex: "elbow", wrist_flex: "wrist flex",
+                       wrist_roll: "wrist roll", gripper: "gripper" };
+let live = null, liveRetry = null, lastJointLog = -1;
+
+function connectLive() {
+  if (!token || (live && live.readyState <= 1)) return;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  live = new WebSocket(`${proto}://${location.host}/api/live?token=${encodeURIComponent(token)}`);
+  live.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "backlog") { $("log").innerHTML = ""; m.events.forEach(addLog); if (m.frame) showFrame(m.frame, false); }
+    else if (m.type === "event") addLog(m.event);
+    else if (m.type === "frame") showFrame(m, true);
+  };
+  live.onclose = () => { clearTimeout(liveRetry); liveRetry = setTimeout(connectLive, 2000); };
+}
+
+function addLog(ev) {
+  const box = $("log"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  const row = document.createElement("div");
+  const at = ev.at ? new Date(ev.at) : new Date();
+  row.innerHTML = `<span class="at">${at.toLocaleTimeString([], { hour12: false })}.${String(at.getMilliseconds()).padStart(3, "0")[0]}</span>` +
+    `<span class="k ${ev.kind}">${ev.kind}</span><span class="x"></span>`;
+  row.querySelector(".x").textContent = ev.text;
+  box.appendChild(row);
+  while (box.children.length > 400) box.removeChild(box.firstChild);
+  if (stick) box.scrollTop = box.scrollHeight;
+  if (ev.kind === "heard") lastJointLog = -1;
+}
+
+const pos = (name, v) => name === "gripper" ? Math.max(0, Math.min(100, v)) : Math.max(0, Math.min(100, (v + 100) / 2));
+
+function showFrame(f, fresh) {
+  $("liveImg").src = "data:image/jpeg;base64," + f.jpeg;
+  $("liveBadge").textContent = fresh ? `t = ${f.t.toFixed(1)} s` : "last frame";
+  const box = $("joints");
+  if (box.children.length !== f.joints.length) {
+    box.innerHTML = f.joints.map((j) => `<div class="joint" id="j-${j}"><span class="name">${JOINT_LABELS[j] || j}</span>` +
+      `<div class="track">${j === "gripper" ? "" : '<span class="zero"></span>'}<span class="target"></span><span class="state"></span></div>` +
+      `<span class="num"></span></div>`).join("");
+  }
+  f.joints.forEach((j, i) => {
+    const row = $("j-" + j), s = f.state[i], t = f.target ? f.target[i] : null;
+    row.querySelector(".state").style.left = pos(j, s) + "%";
+    const tgt = row.querySelector(".target");
+    tgt.style.display = t === null ? "none" : ""; if (t !== null) tgt.style.left = pos(j, t) + "%";
+    row.querySelector(".num").textContent = t === null ? s.toFixed(0) : `${s.toFixed(0)} → ${t.toFixed(0)}`;
+  });
+  // one transcript line per second of motion: the joint targets the arm is being driven to
+  if (fresh && f.target && Math.floor(f.t) !== lastJointLog) {
+    lastJointLog = Math.floor(f.t);
+    addLog({ kind: "joints", text: `t=${f.t.toFixed(1)}s target ` + f.joints.map((j, i) => `${(JOINT_LABELS[j] || j).split(" ").pop()} ${f.target[i].toFixed(0)}`).join(" · ") });
+  }
+}
+connectLive();
 
 // --- push-to-talk: record, convert to 16 kHz mono WAV (what Whisper expects), send base64
 let rec = null, chunks = [];

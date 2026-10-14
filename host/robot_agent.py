@@ -5,7 +5,9 @@ skills from config.toml [skills.*], and then:
   snapshot -> sends one JPEG from the same camera the policy uses
   run      -> runs the skill (real: robot.py rollout / replay, sim: policy or motion in MuJoCo)
   stop     -> stops the running skill
-and reports status + an after-snapshot when a skill finishes.
+and reports status + an after-snapshot when a skill finishes. While a skill runs it streams what the
+dashboard's Live panel shows: `log` lines (inference, phases) and, in the sim, ~8 Hz `frame`s (camera JPEG +
+joint state + the commanded joint targets).
 
     .venv\\Scripts\\python host\\robot_agent.py --url https://robot-router.<you>.workers.dev --token <ROBOT_TOKEN>
     .venv\\Scripts\\python host\\robot_agent.py --url http://127.0.0.1:8787 --token dev --sim --show
@@ -16,6 +18,7 @@ import asyncio
 import base64
 import json
 import math
+import os
 import queue
 import subprocess
 import sys
@@ -32,8 +35,12 @@ CONFIG = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
 SKILLS = CONFIG.get("skills", {})
 
 
-def jpeg_b64(rgb: np.ndarray) -> str:
-    ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 80])
+JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+FRAME_HZ = 8  # live stream rate to the dashboard (each frame ~25 KB)
+
+
+def jpeg_b64(rgb: np.ndarray, quality: int = 80) -> str:
+    ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, quality])
     return base64.b64encode(buf.tobytes()).decode() if ok else ""
 
 
@@ -49,6 +56,10 @@ class Backend:
 
     def skills(self) -> list[dict]:
         raise NotImplementedError
+
+    def log(self, text: str) -> None:
+        print("  ", text, flush=True)
+        self.send({"type": "log", "text": text})
 
     def submit(self, msg: dict) -> None:
         if msg["type"] == "stop":
@@ -118,7 +129,15 @@ class RealBackend(Backend):
         else:
             cmd = py + ["replay", "--dataset", s["replay_dataset"], "--episode", str(s.get("replay_episode", 0))]
         print(">", " ".join(cmd), flush=True)
-        self.proc = subprocess.Popen(cmd, cwd=ROOT)
+        self.log("run: " + " ".join(cmd[1:]))
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, encoding="utf-8", errors="replace", env={**os.environ, "PYTHONUTF8": "1"})
+        last = 0.0
+        for line in self.proc.stdout:  # lerobot's own log, rate-limited so progress bars don't flood the socket
+            line = line.strip()
+            if line and (time.perf_counter() - last > 0.5 or "error" in line.lower()):
+                last = time.perf_counter()
+                self.log(line[:300])
         code = self.proc.wait()
         self.proc = None
         if self.stop_flag.is_set():
@@ -136,6 +155,8 @@ class SimBackend(Backend):
     def __init__(self, send, show: bool):
         self.show = show
         self.last = None
+        self.t0 = 0.0
+        self.next_frame = 0.0
         super().__init__(send)
 
     def skills(self):
@@ -152,11 +173,18 @@ class SimBackend(Backend):
         self.last = self.env.reset(seed=self.seed).image
         self.policies = {}
 
-    def _frame(self, obs):
+    def _frame(self, obs, target=None):
         self.last = obs.image
         if self.show:
             cv2.imshow("SO-101 sim (robot_agent)", obs.image[:, :, ::-1])
             cv2.waitKey(1)
+        now = time.perf_counter()
+        if now >= self.next_frame:  # live view for the dashboard
+            self.next_frame = now + 1 / FRAME_HZ
+            small = cv2.resize(obs.image, (320, 240), interpolation=cv2.INTER_AREA)
+            self.send({"type": "frame", "t": round(now - self.t0, 2), "jpeg": jpeg_b64(small, 70),
+                       "joints": JOINTS, "state": [round(float(v), 1) for v in obs.state],
+                       "target": None if target is None else [round(float(v), 1) for v in target]})
 
     def snapshot(self):
         return jpeg_b64(self.env.render())
@@ -182,20 +210,26 @@ class SimBackend(Backend):
     def run(self, skill):
         s = SKILLS[skill]
         motion = s.get("sim_motion")
+        self.t0 = time.perf_counter()
+        self.next_frame = 0.0
         if motion == "reset":
             self.seed += 1
             self._frame(self.env.reset(seed=self.seed))
+            self.log(f"scene reset (seed {self.seed})")
             return True, "new pen placed"
         if motion == "wave":
             sys.path.insert(0, str(ROOT / "host"))
             from leader_to_sim import NAMES, wave
 
+            self.log("scripted motion: 6 s wave, joint targets from a sine pattern (no AI model)")
             t0 = time.perf_counter()
             while (t := time.perf_counter() - t0) < 6 and not self.stop_flag.is_set():
-                self._frame(self.env.step(np.array([wave(t)[n] for n in NAMES], np.float32)))
+                target = np.array([wave(t)[n] for n in NAMES], np.float32)
+                self._frame(self.env.step(target), target)
                 time.sleep(max(0, 1 / 30 - (time.perf_counter() - t0 - t)))
+            self.log("returning to home pose")
             for _ in range(30):
-                self._frame(self.env.step(self.HOME))
+                self._frame(self.env.step(self.HOME), self.HOME)
             return True, "waved"
 
         from lerobot.common.control_utils import predict_action
@@ -203,18 +237,32 @@ class SimBackend(Backend):
         path = str(ROOT / s["sim_policy"])
         if not Path(path).exists():
             return False, f"sim policy not trained yet: {s['sim_policy']}"
+        if path not in self.policies:
+            self.log(f"loading policy {s['sim_policy']}")
         pol, pre, post, dev = self._policy(path)
         pol.reset(); pre.reset(); post.reset()
+        c = pol.config
+        self.log(f"{c.type.upper()} policy on {dev.type}: camera 640x480 + 6 joint angles in -> "
+                 f"chunk of {getattr(c, 'chunk_size', '?')} future joint targets out, executes {getattr(c, 'n_action_steps', '?')} of them at 30 Hz")
+        ensemble = getattr(c, "temporal_ensemble_coeff", None) is not None  # then it infers every step
         obs = self.env.observe()
         lifted = False
-        for _ in range(int(s.get("duration_s", 8) * 30)):
+        for i in range(int(s.get("duration_s", 8) * 30)):
             if self.stop_flag.is_set():
                 return False, "stopped"
             t = time.perf_counter()
+            infer = i % 30 == 0 if ensemble else len(getattr(pol, "_action_queue", ())) == 0
             act = predict_action({"observation.state": obs.state, "observation.images.front": obs.image},
                                  pol, dev, pre, post, use_amp=False, task=s["description"], robot_type="so101_follower_sim")
-            obs = self.env.step(act.cpu().numpy().reshape(-1))
-            self._frame(obs)
+            target = act.cpu().numpy().reshape(-1)
+            if infer:
+                ms = (time.perf_counter() - t) * 1000
+                self.log(f"step {i}: inference {ms:.0f} ms - state [{', '.join(f'{v:.0f}' for v in obs.state)}] "
+                         f"-> next target [{', '.join(f'{v:.0f}' for v in target)}]")
+            obs = self.env.step(target)
+            self._frame(obs, target)
+            if not lifted and self.env.is_success():
+                self.log(f"step {i}: pen is off the table")
             lifted |= self.env.is_success()
             time.sleep(max(0, 1 / 30 - (time.perf_counter() - t)))
         return lifted, "pen lifted" if lifted else "pen not lifted"

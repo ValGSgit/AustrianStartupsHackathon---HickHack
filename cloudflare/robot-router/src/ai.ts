@@ -25,7 +25,12 @@ export async function transcribe(ai: Ai, audioBase64: string): Promise<string> {
   return (out.text ?? "").trim();
 }
 
-export async function describeScene(ai: Ai, jpegBase64: string): Promise<string> {
+/** Tells the vision model what the arm is; the sim's yellow arm is otherwise read as a "vehicle". */
+const arm = (mode: string) =>
+  `Front camera of a robot workspace. The large ${mode === "sim" ? "yellow " : ""}object in the middle is the robot ` +
+  "arm itself (an SO-101 arm with a two-finger gripper), standing on a table. ";
+
+export async function describeScene(ai: Ai, jpegBase64: string, mode: string): Promise<string> {
   const out = (await ai.run(MODELS.vision, {
     messages: [
       {
@@ -33,11 +38,13 @@ export async function describeScene(ai: Ai, jpegBase64: string): Promise<string>
         content: [
           {
             type: "text",
+            // Tested on the sim camera: without being told what the arm is, Mistral calls it a "vehicle", and a
+            // "list objects or say 'no objects'" prompt makes it answer 'no objects' even with a pen in view.
             text:
-              "Camera view of a robot arm's workspace. IGNORE the robot arm itself, its base and the table/mat. " +
-              "List every small loose object lying on the table, e.g. pens, markers, cubes, blocks, cups " +
-              "(color + type + position left/center/right). Look carefully, objects can be thin. " +
-              "If there are none, say 'no objects'. One short line, no intro.",
+              arm(mode) +
+              "Describe in one sentence what else is on the table besides the arm: name each object with " +
+              "its color, what it probably is (pen, cube, cup, ...) and where it is relative to the gripper. " +
+              "If nothing else is there, say 'nothing besides the arm'. No intro.",
           },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpegBase64}` } },
         ],
@@ -48,7 +55,7 @@ export async function describeScene(ai: Ai, jpegBase64: string): Promise<string>
   return (out.response ?? "").trim();
 }
 
-export async function verifyOutcome(ai: Ai, jpegBase64: string, skill: Skill): Promise<string> {
+export async function verifyOutcome(ai: Ai, jpegBase64: string, skill: Skill, mode: string): Promise<string> {
   const out = (await ai.run(MODELS.vision, {
     messages: [
       {
@@ -57,8 +64,10 @@ export async function verifyOutcome(ai: Ai, jpegBase64: string, skill: Skill): P
           {
             type: "text",
             text:
-              `A robot arm just tried to do this: "${skill.description}". Looking at this image, did it ` +
-              `succeed? Answer "yes" or "no", then at most 12 words why.`,
+              arm(mode) +
+              `It just tried to do this: "${skill.description}". This is one still image taken right after. ` +
+              `If that task is only a motion that leaves nothing to see afterwards (like waving), answer ` +
+              `"n/a - motion only". Otherwise answer "yes" or "no", then at most 12 words why.`,
           },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpegBase64}` } },
         ],

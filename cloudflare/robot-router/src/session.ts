@@ -2,7 +2,9 @@
 // (hibernation API, so an idle connection costs nothing) and the robot's state.
 //
 // Agent -> DO messages:   hello {skills, mode} | snapshot {id, jpeg} | status {state, detail} | done {skill, ok, detail, jpeg?}
+//                         log {text} | frame {t, jpeg, joints, state, target}   (live view while a skill runs)
 // DO -> agent messages:   snapshot {id} | run {skill} | stop
+// DO -> viewer messages:  backlog {events, frame} | event {event} | frame {...}   (dashboard Live panel, /api/live)
 
 import { DurableObject } from "cloudflare:workers";
 import { verifyOutcome, type Decision, type Skill } from "./ai";
@@ -38,24 +40,44 @@ export interface State {
 
 type Pending = { resolve: (jpeg: string | null) => void; timer: ReturnType<typeof setTimeout> };
 
+/** One line of the pipeline log the dashboard shows: heard -> camera -> vision -> router -> run -> inference -> result. */
+export interface LiveEvent {
+  at: string;
+  kind: string; // heard | camera | vision | router | guard | run | agent | done | verify | stop | error | conn
+  text: string;
+}
+
+const MAX_EVENTS = 200;
+
 export class RobotSession extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
+  // In memory only: the live log is for watching, not keeping (it is lost if the DO hibernates while idle).
+  private events: LiveEvent[] = [];
+  private lastFrame: string | null = null;
 
-  // ------------------------------------------------------------ agent WebSocket
+  // ------------------------------------------------------------ WebSockets: agent (/api/agent), viewers (/api/live)
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("expected websocket", { status: 426 });
-    for (const old of this.ctx.getWebSockets("agent")) old.close(1000, "replaced by a new agent connection");
     const pair = new WebSocketPair();
+    if (new URL(request.url).pathname === "/api/live") {
+      this.ctx.acceptWebSocket(pair[1], ["viewer"]);
+      pair[1].send(`{"type":"backlog","events":${JSON.stringify(this.events)},"frame":${this.lastFrame ?? "null"}}`);
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+    for (const old of this.ctx.getWebSockets("agent")) old.close(1000, "replaced by a new agent connection");
     this.ctx.acceptWebSocket(pair[1], ["agent"]);
     await this.patch({ status: "idle", detail: "agent connected", current: null });
+    this.event("conn", "robot agent connected");
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    if (!this.ctx.getTags(ws).includes("agent")) return; // viewers only listen
+    const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
     let msg: any;
     try {
-      msg = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+      msg = JSON.parse(text);
     } catch {
       return;
     }
@@ -80,20 +102,33 @@ export class RobotSession extends DurableObject<Env> {
       case "status":
         await this.patch({ status: String(msg.state), detail: String(msg.detail ?? "") });
         break;
+      case "log":
+        this.event("agent", String(msg.text ?? ""));
+        break;
+      case "frame":
+        this.lastFrame = text;
+        this.broadcast(text);
+        break;
       case "done": {
-        const skill = (await this.state()).skills.find((s) => s.name === msg.skill) ?? {
+        const st = await this.state();
+        const skill = st.skills.find((s) => s.name === msg.skill) ?? {
           name: String(msg.skill),
           description: String(msg.skill),
         };
         await this.patch({ status: "idle", current: null, detail: String(msg.detail ?? "done") });
         const result = { skill: skill.name, ok: !!msg.ok, detail: String(msg.detail ?? ""), verdict: "", at: new Date().toISOString() };
         await this.ctx.storage.put("lastResult", result);
+        this.event("done", `${skill.name}: ${result.ok ? "ok" : "not ok"} - ${result.detail}`);
         if (msg.jpeg) {
           await this.ctx.storage.put("img:after", msg.jpeg);
           // Ask the vision model whether it worked; don't block the agent on it.
+          this.event("verify", "after-image sent to Mistral Small 3.1 to double-check the result…");
           this.ctx.waitUntil(
-            verifyOutcome(this.env.AI, msg.jpeg, skill)
-              .then((verdict) => this.ctx.storage.put("lastResult", { ...result, verdict }))
+            verifyOutcome(this.env.AI, msg.jpeg, skill, st.mode)
+              .then((verdict) => {
+                this.event("verify", verdict);
+                return this.ctx.storage.put("lastResult", { ...result, verdict });
+              })
               .catch((e) => this.ctx.storage.put("lastResult", { ...result, verdict: `check failed: ${e}` })),
           );
         }
@@ -102,9 +137,11 @@ export class RobotSession extends DurableObject<Env> {
     }
   }
 
-  async webSocketClose(): Promise<void> {
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    if (!this.ctx.getTags(ws).includes("agent")) return;
     if (this.ctx.getWebSockets("agent").length <= 1) {
       await this.patch({ status: "offline", detail: "agent disconnected", current: null });
+      this.event("conn", "robot agent disconnected");
     }
   }
 
@@ -142,6 +179,7 @@ export class RobotSession extends DurableObject<Env> {
     if (!s.skills.some((k) => k.name === skill)) return { ok: false, reason: `unknown skill '${skill}'` };
     if (s.status === "running") return { ok: false, reason: `busy running '${s.current}'` };
     ws.send(JSON.stringify({ type: "run", skill }));
+    this.event("run", `sent '${skill}' to the ${s.mode} robot`);
     await this.ctx.storage.delete("img:after");
     await this.patch({ status: "running", current: skill, detail: `running ${skill}` });
     return { ok: true, reason: "started" };
@@ -150,6 +188,7 @@ export class RobotSession extends DurableObject<Env> {
   async stop(): Promise<boolean> {
     const ws = this.agent();
     ws?.send(JSON.stringify({ type: "stop" }));
+    this.event("stop", ws ? "STOP sent to the robot" : "STOP pressed, but no robot agent is connected");
     await this.patch({ detail: "stop requested" });
     return !!ws;
   }
@@ -158,7 +197,29 @@ export class RobotSession extends DurableObject<Env> {
     await this.ctx.storage.put("lastCommand", entry);
   }
 
+  /** Append a line to the live log (called by the Worker at each pipeline stage). */
+  async log(kind: string, text: string): Promise<void> {
+    this.event(kind, text);
+  }
+
   // ------------------------------------------------------------ helpers
+
+  private event(kind: string, text: string): void {
+    const e: LiveEvent = { at: new Date().toISOString(), kind, text };
+    this.events.push(e);
+    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
+    this.broadcast(JSON.stringify({ type: "event", event: e }));
+  }
+
+  private broadcast(text: string): void {
+    for (const v of this.ctx.getWebSockets("viewer")) {
+      try {
+        v.send(text);
+      } catch {
+        // viewer already gone; the runtime drops it
+      }
+    }
+  }
 
   private agent(): WebSocket | null {
     return this.ctx.getWebSockets("agent")[0] ?? null;
