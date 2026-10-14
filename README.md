@@ -26,6 +26,9 @@ python -m uv pip install --python .venv\Scripts\python.exe "lerobot[core-scripts
 # torchcodec can't find FFmpeg DLLs on Windows and floods every command with errors.
 # Without it LeRobot quietly uses pyav (bundled FFmpeg) - verified to record + decode fine.
 python -m uv pip uninstall --python .venv\Scripts\python.exe torchcodec
+# lerobot ships headless OpenCV (no windows). stage.py / selfcheck.py need the GUI build, same version.
+python -m uv pip uninstall --python .venv\Scripts\python.exe opencv-python-headless
+python -m uv pip install --python .venv\Scripts\python.exe opencv-python==4.13.0.92
 .venv\Scripts\python robot.py check        # expect cuda=True and your GPU
 hf auth login                               # write token from huggingface.co/settings/tokens (.venv\Scripts\hf.exe)
 ```

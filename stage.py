@@ -19,6 +19,7 @@ import datetime as dt
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ import selfcheck
 
 ROOT = Path(__file__).resolve().parent
 EVAL_LOG = ROOT / "evals" / "eval_log.csv"
+LIVE_FRAME = Path(tempfile.gettempdir()) / "stage_live.jpg"
 STAGE = {"duration_s": 25, "attempts": 3, "n_action_steps": 100, "temporal_ensemble_coeff": 0.0,
          **robot.CONFIG.get("stage", {})}
 
@@ -59,10 +61,12 @@ def resolve_policy(policy: str | None) -> str:
     return str(local) if local.exists() else robot.hf_repo(policy)
 
 
-def rollout_cmd(policy_path: str, duration: int, n_action_steps: int, ensemble: float) -> list[str]:
-    exe = robot.SCRIPTS / "lerobot-rollout.exe"
+def rollout_cmd(policy_path: str, duration: int, n_action_steps: int, ensemble: float, mock: bool = False) -> list[str]:
+    # rollout_live.py = lerobot-rollout + live camera frames for the status screen.
+    if mock:  # no robot: stream the webcam for `duration` seconds, to rehearse the stage flow
+        return [sys.executable, str(ROOT / "rollout_live.py"), "--mock", f"--duration={duration}"]
     return [
-        str(exe if exe.exists() else "lerobot-rollout"),
+        sys.executable, str(ROOT / "rollout_live.py"),
         "--strategy.type=base",
         f"--policy.path={policy_path}",
         *reactivity_args(n_action_steps, ensemble),
@@ -97,14 +101,34 @@ def say(text: str) -> None:
     lerobot_say(text, blocking=False)
 
 
-def run_attempt(cmd: list[str], title: str, sub: str, last_img) -> str:
+def live_view(setup: dict, cache: dict):
+    """Latest frame the rollout published, annotated by the self-check. None until the first frame arrives."""
+    try:
+        mtime = LIVE_FRAME.stat().st_mtime
+    except OSError:
+        return cache.get("view"), cache.get("ok", False)
+    if mtime != cache.get("mtime"):
+        frame = cv2.imread(str(LIVE_FRAME))
+        if frame is not None:
+            cache["ok"], _, cache["view"] = selfcheck.check(frame, setup)
+            cache["mtime"] = mtime
+    return cache.get("view"), cache.get("ok", False)
+
+
+def run_attempt(cmd: list[str], title: str, sub: str, last_img, setup: dict) -> str:
     """Runs one rollout while keeping the status window alive. Returns 'done' or 'estop'."""
     print(">", " ".join(cmd), flush=True)
-    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    LIVE_FRAME.unlink(missing_ok=True)
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "LIVE_FRAME": str(LIVE_FRAME)}
     proc = subprocess.Popen(cmd, env=env)
     t0 = time.time()
+    cache: dict = {}
     while proc.poll() is None:
-        k = show(screen(title, AMBER, f"{sub}\n{time.time() - t0:4.0f} s   (ESC = emergency stop)", last_img), 50)
+        view, in_box = live_view(setup, cache)
+        live = f"live: {'cube in box' if in_box else 'working'}" if view is not None else "starting..."
+        k = show(screen(title, GREEN if in_box else AMBER,
+                        f"{sub}\n{live}\n{time.time() - t0:4.0f} s   (ESC = emergency stop)",
+                        view if view is not None else last_img), 50)
         if k == 27:
             # Killing the process skips the torque-off on disconnect: the arm freezes in its pose.
             proc.kill()
@@ -126,8 +150,8 @@ def check_now(setup: dict):
 
 def cmd_demo(a):
     setup = selfcheck.load_setup()
-    policy = resolve_policy(a.policy)
-    cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble)
+    policy = "mock" if a.mock else resolve_policy(a.policy)
+    cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble, a.mock)
     react = reactivity_label(a.n_action_steps, a.ensemble)
     print(f"policy {policy}\nreactivity {react}")
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
@@ -143,7 +167,7 @@ def cmd_demo(a):
             continue
         for attempt in range(1, a.attempts + 1):
             say("On it" if attempt == 1 else "Missed. Trying again")
-            if run_attempt(cmd, f"Attempt {attempt}/{a.attempts}", "robot working", last_img) == "estop":
+            if run_attempt(cmd, f"Attempt {attempt}/{a.attempts}", "robot working", last_img, setup) == "estop":
                 while show(screen("EMERGENCY STOP", RED, "SPACE to reset"), 50) != ord(" "):
                     pass
                 break
@@ -162,8 +186,8 @@ def cmd_demo(a):
 
 def cmd_eval(a):
     setup = selfcheck.load_setup()
-    policy = resolve_policy(a.policy)
-    cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble)
+    policy = "mock" if a.mock else resolve_policy(a.policy)
+    cmd = rollout_cmd(policy, a.duration, a.n_action_steps, a.ensemble, a.mock)
     react = reactivity_label(a.n_action_steps, a.ensemble)
     label = a.label
     results = []
@@ -180,7 +204,7 @@ def cmd_eval(a):
             continue
         if k != ord(" "):
             continue
-        if run_attempt(cmd, f"Position {pos}", f"{label}  {react}", last_img) == "estop":
+        if run_attempt(cmd, f"Position {pos}", f"{label}  {react}", last_img, setup) == "estop":
             log_row(label, policy, react, pos, False, "collision", "emergency stop")
             results.append(False)
             pos += 1
@@ -246,6 +270,7 @@ def main():
         s.add_argument("--n-action-steps", type=int, default=STAGE["n_action_steps"], help="re-plan every N steps")
         s.add_argument("--ensemble", type=float, default=STAGE["temporal_ensemble_coeff"],
                        help="temporal ensembling coeff, e.g. 0.01 (0 = off)")
+        s.add_argument("--mock", action="store_true", help="no robot: stream the webcam instead of a rollout")
 
     s = sub.add_parser("demo", help="stage loop: attempt, self-check, retry")
     common(s)

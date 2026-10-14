@@ -67,6 +67,15 @@ Pick the stage setting by: clean success ≥ 16/20 first, then disturbance succe
 
 ## 4. On stage
 
+Rehearse without the arm (webcam stands in for the rollout, everything else is real):
+
+```powershell
+.venv\Scripts\python stage.py demo --mock --duration 8
+```
+
+During an attempt the screen shows the robot's camera live (frames come from the rollout process itself,
+via `rollout_live.py`), with the box outline turning green the moment the cube is inside.
+
 ```powershell
 .venv\Scripts\python stage.py demo --fullscreen
 ```
