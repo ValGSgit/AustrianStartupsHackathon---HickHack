@@ -82,7 +82,7 @@ def connect_leader(fake: bool):
 
     l = A.CONFIG["leader"]
     leader = SO101Leader(SO101LeaderConfig(port=l["port"], id=l["id"], calibration_dir=A.CALIB_DIR))
-    leader.connect(calibrate=False)
+    A.connect_retry(leader)
     if not leader.is_calibrated:
         sys.exit(f"leader is not calibrated (no calibration/{l['id']}.json)")
     return leader

@@ -59,10 +59,26 @@ def connect(fake: bool = False, max_step: float | None = 10.0):
     arm = SO101Follower(SO101FollowerConfig(
         port=f["port"], id=f["id"], calibration_dir=CALIB_DIR,
         max_relative_target=max_step, disable_torque_on_disconnect=True))
-    arm.connect(calibrate=False)
+    connect_retry(arm)
     if not arm.is_calibrated:
         sys.exit(f"follower is not calibrated (no calibration/{f['id']}.json)")
     return arm
+
+
+def connect_retry(device, tries: int = 3) -> None:
+    """The motor bus sometimes misses one reply while connecting ("no status packet"). Try again before giving up."""
+    for i in range(tries):
+        try:
+            device.connect(calibrate=False)
+            return
+        except ConnectionError as e:
+            print(f"connect {type(device).__name__}: {str(e)[:90]} - retrying ({i + 1}/{tries})", flush=True)
+            try:
+                device.bus.port_handler.closePort()
+            except Exception:
+                pass
+            time.sleep(0.5)
+    device.connect(calibrate=False)
 
 
 def read_pose(arm) -> dict[str, float]:
