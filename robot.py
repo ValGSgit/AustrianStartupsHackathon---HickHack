@@ -128,6 +128,41 @@ def cmd_setup_motors(a):
         run("lerobot-setup-motors", f"--teleop.type={l['type']}", f"--teleop.port={l['port']}")
 
 
+def cmd_positions(a):
+    """Print joint values in LeRobot units - the same numbers datasets store and policies output."""
+    import time
+
+    from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+    l, f = CONFIG["leader"], CONFIG["follower"]
+    devices = [("leader", SO101Leader(SO101LeaderConfig(port=l["port"], id=l["id"], calibration_dir=CALIB_DIR)))]
+    if a.follower:
+        from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+
+        # keep torque on when we disconnect, so the follower holds its pose instead of dropping
+        devices.append(("follower", SO101Follower(SO101FollowerConfig(
+            port=f["port"], id=f["id"], calibration_dir=CALIB_DIR, disable_torque_on_disconnect=False))))
+    for label, d in devices:
+        d.connect(calibrate=False)
+        if not d.is_calibrated:
+            sys.exit(f"{label} is not calibrated (no calibration/{CONFIG[label]['id']}.json) - run: robot.py calibrate {label}")
+    names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    print("            " + " ".join(f"{n[:12]:>13}" for n in names))
+    try:
+        while True:
+            for label, d in devices:
+                vals = d.get_action() if label == "leader" else d.get_observation()
+                print(f"{label:>10}: " + " ".join(f"{vals[n + '.pos']:13.1f}" for n in names), flush=True)
+            if not a.watch:
+                break
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for _, d in devices:
+            d.disconnect()
+
+
 def cmd_calibrate(a):
     if a.arm == "follower":
         run("lerobot-calibrate", *robot_args(with_cameras=False))
@@ -157,7 +192,7 @@ def cmd_record(a):
         "lerobot-record",
         *robot_args(),
         *teleop_args(),
-        f"--dataset.repo_id={hf_repo(name)}",
+        f"--dataset.repo_id={hf_repo(name, local_ok=a.no_push)}",
         f"--dataset.root={root}",
         f"--dataset.num_episodes={a.episodes}",
         f"--dataset.single_task={t['description']}",
@@ -176,7 +211,7 @@ def cmd_replay(a):
     run(
         "lerobot-replay",
         *robot_args(with_cameras=False),
-        f"--dataset.repo_id={hf_repo(name)}",
+        f"--dataset.repo_id={hf_repo(name, local_ok=True)}",
         f"--dataset.root={dataset_root(name)}",
         f"--dataset.episode={a.episode}",
     )
@@ -259,6 +294,11 @@ def main():
     s.add_argument("arm", choices=["follower", "leader"])
     s.set_defaults(fn=cmd_calibrate)
 
+    s = sub.add_parser("positions", help="print joint values in LeRobot units (check calibration / directions)")
+    s.add_argument("--follower", action="store_true", help="also read the follower (it keeps holding its pose)")
+    s.add_argument("--watch", action="store_true", help="keep printing 4x per second until Ctrl-C")
+    s.set_defaults(fn=cmd_positions)
+
     s = sub.add_parser("teleop", help="drive the follower with the leader arm")
     s.add_argument("--no-cameras", action="store_true", help="skip cameras and the rerun viewer")
     s.set_defaults(fn=cmd_teleop)
@@ -292,7 +332,7 @@ def main():
     s.add_argument("--display", action="store_true", help="show cameras in rerun (costs some fps)")
     s.add_argument("--max-step", type=float, metavar="N",
                    help="safety: cap each joint's move per 30 Hz step to N position units (-100..100 scale); "
-                        "try 5 for a first, slow rollout")
+                        "2 = ~60 units/s, good for a first supervised rollout")
     s.set_defaults(fn=cmd_rollout)
 
     a = p.parse_args()

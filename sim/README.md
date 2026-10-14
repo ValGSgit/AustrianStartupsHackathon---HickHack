@@ -32,11 +32,18 @@ sim with its normal settings. On ROS topics, joints are in radians (ROS standard
 How this was matched to the real arm (`env.py` `lerobot_to_rad`):
 * LeRobot normalizes each motor linearly over the range swept during calibration, with zero at the middle.
   Its kinematics code feeds joint degrees straight into this same SO-101 URDF, so directions match one-to-one.
-* Checked on the real Hugging Face dataset `lerobot/svla_so101_pickplace` (50 episodes, 11,939 frames).
-  Replayed through the sim's kinematics, the gripper is at table height (median −0.5 cm) exactly at the
-  737 moments the real gripper closes on an object, 14 cm in front of the base. The episode start pose is the
-  folded rest pose.
-* The scripted expert seeds its IK with the **median real grasp pose**, so it uses the same elbow configuration
+* Checked on real Hugging Face datasets: replayed through the sim's kinematics, the gripper is at table height
+  at the moments the real gripper closes on an object:
+
+  | dataset | robot_type | frames | grasp moments | gripper height at grasp (median) |
+  |---|---|---|---|---|
+  | `youliangtan/so101-table-cleanup` | `so101_follower` | 46,963 | 5,018 | −1.2 cm |
+  | `lerobot/svla_so101_pickplace` | `so100_follower` (SO-101 arm per its name) | 11,939 | 737 | −0.5 cm |
+
+  The episode start pose maps to the folded rest pose with the gripper resting on the table.
+* Careful when mixing Hub datasets: some are recorded with `use_degrees=True` (values beyond ±100, e.g.
+  `hungho77/so101_left_arm_pick_red_cube_into_pot`). Those are in different units from ours.
+* The scripted expert seeds its IK with the **median real grasp pose** (from `svla_so101_pickplace`), so it uses the same elbow configuration
   as human teleoperators. Objects are placed where real grasps happen (13–23 cm in front, ±10 cm sideways).
 
 Pad-based gripper contact: the jaw meshes collide as convex hulls, which fill the gap between the

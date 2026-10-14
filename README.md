@@ -40,6 +40,8 @@ Then set `[hf] user` in `config.toml`.
 
 ## 2. Hardware setup
 
+**Full step-by-step bring-up with checks: [docs/real_arm_guide.md](docs/real_arm_guide.md).** Short version:
+
 ```powershell
 .venv\Scripts\python robot.py find-port          # unplug/replug when asked -> put COM ports in config.toml
 .venv\Scripts\python robot.py find-cameras       # pick camera index -> config.toml [cameras.front]

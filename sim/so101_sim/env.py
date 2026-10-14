@@ -5,8 +5,9 @@ so sim datasets/policies and real recordings mean the same thing:
   arm joints -100..100 = the calibrated joint range (0 = middle, the "new calibration" zero),
   wrist_roll -100..100 = -180..180 deg (LeRobot calibrates it as a full turn),
   gripper 0..100 (0 = closed).
-Mapping derived from LeRobot's motor normalization + kinematics code and checked against the real
-Hugging Face dataset lerobot/svla_so101_pickplace (gripper reaches table height exactly when it closes).
+Mapping derived from LeRobot's motor normalization + kinematics code and checked against real Hugging Face
+datasets: youliangtan/so101-table-cleanup (robot_type so101_follower) and lerobot/svla_so101_pickplace
+(recorded as so100_follower): the gripper reaches table height exactly when it closes on an object.
 """
 
 from __future__ import annotations
