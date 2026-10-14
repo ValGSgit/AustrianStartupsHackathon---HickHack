@@ -4,8 +4,12 @@ Teach the SO-101 follower arm a pick & place task from ~50 teleoperated demos
 (leader arm + camera), train an **ACT** policy on a local GPU with
 [LeRobot](https://huggingface.co/docs/lerobot), and run it live on stage.
 
-**Cloudflare layer (design):** [docs/architecture.md](docs/architecture.md) shows how a voice or text command goes through
-Workers AI (speech-to-text, vision, an LLM router) and gets translated into the right trained policy on the arm.
+| Where | What |
+|---|---|
+| [docs/real_arm_guide.md](docs/real_arm_guide.md) | **connect + test the real arm**, follow a movement, grab a pen |
+| [sim/README.md](sim/README.md) | MuJoCo + ROS 2 (Docker) simulation: practice the whole loop without hardware |
+| [cloudflare/robot-router](cloudflare/robot-router) | voice/text → Workers AI → the right skill (Worker + dashboard) |
+| [docs/architecture.md](docs/architecture.md) | how the Cloudflare layer, camera and policies fit together (diagrams) |
 
 Everything goes through `robot.py`, which builds the `lerobot-*` commands from
 `config.toml`. That keeps ports, calibration ids and camera settings identical
@@ -26,6 +30,8 @@ python -m uv pip install --python .venv\Scripts\python.exe "lerobot[core-scripts
 # torchcodec can't find FFmpeg DLLs on Windows and floods every command with errors.
 # Without it LeRobot quietly uses pyav (bundled FFmpeg) - verified to record + decode fine.
 python -m uv pip uninstall --python .venv\Scripts\python.exe torchcodec
+# sim + Cloudflare agent extras
+python -m uv pip install --python .venv\Scripts\python.exe mujoco==3.3.7 websockets==15.0.1 trimesh==4.8.3 fast-simplification==0.1.11
 .venv\Scripts\python robot.py check        # expect cuda=True and your GPU
 hf auth login                               # write token from huggingface.co/settings/tokens (.venv\Scripts\hf.exe)
 ```

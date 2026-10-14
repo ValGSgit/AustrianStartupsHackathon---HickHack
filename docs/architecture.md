@@ -1,7 +1,8 @@
 # Architecture: voice/text command → Cloudflare AI → the right policy on the arm
 
-**Status: design. Not implemented yet.** The robot pipeline (`robot.py`) is implemented and tested.
-This document describes the Cloudflare layer on top of it.
+**Status: implemented** in [`cloudflare/robot-router`](../cloudflare/robot-router) (Worker + dashboard) and
+[`host/robot_agent.py`](../host/robot_agent.py) (laptop agent). Tested locally against real Workers AI with the sim
+standing in for the arm. See the Worker README for results.
 
 ## The core idea: two loops
 
@@ -31,13 +32,13 @@ flowchart LR
         DO[("Durable Object<br/>RobotSession<br/>state + command queue")]
         subgraph WAI["Workers AI"]
             STT["Whisper<br/>@cf/openai/whisper-large-v3-turbo"]
-            VLM["Vision LLM<br/>@cf/meta/llama-3.2-11b-vision-instruct"]
+            VLM["Vision LLM<br/>@cf/mistralai/mistral-small-3.1-24b-instruct"]
             LLM["Router LLM, JSON mode<br/>@cf/meta/llama-3.3-70b-instruct-fp8-fast"]
         end
     end
 
     subgraph LAPTOP["Laptop (GTX 1650)"]
-        AGENT["robot_agent.py<br/>(planned)"]
+        AGENT["host/robot_agent.py"]
         REG[["Policy registry<br/>config.toml [policies.*]"]]
         ROLL["lerobot-rollout<br/>ACT policy, 30 Hz"]
     end

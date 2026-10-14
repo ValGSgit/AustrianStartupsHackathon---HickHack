@@ -46,9 +46,11 @@ def run(tool: str, *args: str) -> None:
     sys.exit(subprocess.call(cmd, env=env))
 
 
-def hf_repo(name: str) -> str:
+def hf_repo(name: str, local_ok: bool = False) -> str:
     user = CONFIG["hf"]["user"]
     if user == "CHANGE_ME":
+        if local_ok:  # local-only data (e.g. sim datasets with --no-push) doesn't need a Hub account
+            return f"local/{name}"
         sys.exit("Set [hf] user in config.toml first (your Hugging Face username).")
     return f"{user}/{name}"
 
@@ -196,12 +198,12 @@ def cmd_train(a):
         sys.exit(f"{out} already exists. Use --resume to continue it, or pick another --policy name.")
     run(
         "lerobot-train",
-        f"--dataset.repo_id={hf_repo(dataset)}",
+        f"--dataset.repo_id={hf_repo(dataset, local_ok=a.no_push)}",
         f"--dataset.root={dataset_root(dataset)}",
         "--policy.type=act",
         "--policy.device=cuda",
         f"--policy.use_amp={str(tr['use_amp']).lower()}",
-        f"--policy.repo_id={hf_repo(policy)}",
+        f"--policy.repo_id={hf_repo(policy, local_ok=a.no_push)}",
         f"--policy.push_to_hub={str(not a.no_push).lower()}",
         "--policy.private=true",
         f"--steps={a.steps or tr['steps']}",
@@ -233,6 +235,7 @@ def cmd_rollout(a):
         f"--task={CONFIG['task']['description']}",
         f"--duration={a.duration}",
         f"--display_data={str(a.display).lower()}",
+        *([f"--robot.max_relative_target={float(a.max_step)}"] if a.max_step else []),
     )
 
 
@@ -287,6 +290,9 @@ def main():
     s.add_argument("--policy", help="policy name, local checkpoint folder, or Hub repo id")
     s.add_argument("--duration", type=int, default=60, help="seconds to run")
     s.add_argument("--display", action="store_true", help="show cameras in rerun (costs some fps)")
+    s.add_argument("--max-step", type=float, metavar="N",
+                   help="safety: cap each joint's move per 30 Hz step to N position units (-100..100 scale); "
+                        "try 5 for a first, slow rollout")
     s.set_defaults(fn=cmd_rollout)
 
     a = p.parse_args()

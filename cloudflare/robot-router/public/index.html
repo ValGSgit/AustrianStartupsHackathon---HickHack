@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SO-101 Command</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e3e1dc;
+    --accent: #e8a90c; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0362c; --chip: #f0eee9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa2; --line: #2c2c31;
+            --accent: #f2b931; --ok: #43c47a; --warn: #e3a33b; --bad: #f0675b; --chip: #26262a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); display: inline-block; }
+  .dot.on { background: var(--ok); } .dot.run { background: var(--accent); }
+  .status { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  .grow { flex: 1; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text], input[type=password] { flex: 1; min-width: 0; padding: 11px 12px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); font: inherit; }
+  button { padding: 10px 14px; border-radius: 9px; border: 1px solid var(--line); background: var(--chip); color: var(--ink);
+    font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1d1d1f; font-weight: 600; }
+  button.stop { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; }
+  button.rec { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .say { font-size: 18px; margin: 4px 0 10px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 99px; background: var(--chip); font-size: 13px; }
+  .tag.started { color: var(--ok); } .tag.needs_confirm, .tag.busy { color: var(--warn); }
+  .tag.error, .tag.none, .tag.no_agent { color: var(--bad); }
+  .imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .imgs figure { margin: 0; } .imgs img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; background: var(--chip); display: block; }
+  figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .skills button { text-align: left; }
+  .skills small { display: block; color: var(--muted); font-size: 12px; }
+  .hidden { display: none; }
+  @media (max-width: 620px) { .imgs { grid-template-columns: 1fr; } .kv { grid-template-columns: 90px 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SO-101 · voice command</h1>
+    <span class="status"><span id="dot" class="dot"></span><span id="statusText">connecting…</span></span>
+    <span class="grow"></span>
+    <button id="stop" class="stop">STOP</button>
+  </header>
+
+  <section id="auth" class="panel hidden">
+    <div class="label">Robot token</div>
+    <div class="row">
+      <input id="token" type="password" placeholder="ROBOT_TOKEN" autocomplete="off">
+      <button id="saveToken" class="primary">Unlock</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="label">Tell the robot what to do</div>
+    <form id="cmdForm" class="row">
+      <input id="cmd" type="text" placeholder="e.g. “pick up the pen”" autocomplete="off">
+      <button id="mic" type="button" title="Hold to talk">🎙 Talk</button>
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="label">Last command</div>
+    <div id="say" class="say">—</div>
+    <div class="kv">
+      <div>Heard</div><div id="heard">—</div>
+      <div>Camera saw</div><div id="scene">—</div>
+      <div>Decision</div><div id="decision">—</div>
+      <div>Result</div><div id="result">—</div>
+    </div>
+    <div id="confirmRow" class="row hidden" style="margin-top:10px">
+      <button id="confirm" class="primary">Run it anyway</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="imgs">
+      <figure><img id="imgBefore" alt=""><figcaption>Before (what the router looked at)</figcaption></figure>
+      <figure><img id="imgAfter" alt=""><figcaption>After the skill</figcaption></figure>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="label">Skills (run directly, skips the AI)</div>
+    <div id="skills" class="row skills"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let token = ""; try { token = localStorage.getItem("robotToken") || ""; } catch {}
+let pendingConfirm = null, lastImgKey = "";
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined
+    ? { headers: { Authorization: "Bearer " + token } }
+    : { method: "POST", headers: { Authorization: "Bearer " + token, "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 401) { $("auth").classList.remove("hidden"); throw new Error("unauthorized"); }
+  return r;
+}
+
+$("saveToken").onclick = () => { token = $("token").value.trim(); try { localStorage.setItem("robotToken", token); } catch {} $("auth").classList.add("hidden"); poll(); };
+$("stop").onclick = () => api("/api/stop", {});
+$("confirm").onclick = async () => { if (pendingConfirm) await api("/api/run", { skill: pendingConfirm }); $("confirmRow").classList.add("hidden"); };
+
+async function send(payload) {
+  $("say").textContent = "Thinking…";
+  const r = await (await api("/api/command", payload)).json();
+  showCommand(r);
+}
+
+$("cmdForm").onsubmit = (e) => { e.preventDefault(); const t = $("cmd").value.trim(); if (t) { send({ text: t }); $("cmd").value = ""; } };
+
+function showCommand(c) {
+  if (!c) return;
+  const d = c.decision;
+  $("say").textContent = d?.say || (c.error ? "Something went wrong." : "—");
+  $("heard").textContent = c.transcript || "—";
+  $("scene").textContent = c.scene || "—";
+  $("decision").innerHTML = d ? `<span class="tag">${d.policy}</span> confidence ${(d.confidence * 100).toFixed(0)}% · <span class="tag ${c.action}">${c.action}</span>` :
+    `<span class="tag ${c.action}">${c.action}</span> ${c.error ? " " + c.error : ""}`;
+  pendingConfirm = c.action === "needs_confirm" ? d.policy : null;
+  $("confirmRow").classList.toggle("hidden", !pendingConfirm);
+}
+
+async function loadImg(kind, el) {
+  const r = await api("/api/image/" + kind);
+  if (r.ok) { const u = URL.createObjectURL(await r.blob()); if (el.src.startsWith("blob:")) URL.revokeObjectURL(el.src); el.src = u; }
+  else el.removeAttribute("src");
+}
+
+async function poll() {
+  if (!token) { $("auth").classList.remove("hidden"); return; }
+  try {
+    const s = await (await api("/api/state")).json();
+    $("dot").className = "dot " + (s.status === "running" ? "run" : s.agentConnected ? "on" : "");
+    $("statusText").textContent = s.agentConnected ? `${s.mode} robot · ${s.status}${s.current ? " · " + s.current : ""}` : "robot agent offline";
+    $("skills").innerHTML = "";
+    for (const k of s.skills) {
+      const b = document.createElement("button");
+      b.innerHTML = `${k.name}<small>${k.description}</small>`;
+      b.disabled = !s.agentConnected || s.status === "running";
+      b.onclick = () => api("/api/run", { skill: k.name });
+      $("skills").appendChild(b);
+    }
+    if (s.lastCommand && document.activeElement !== $("cmd")) showCommand(s.lastCommand);
+    const r = s.lastResult;
+    $("result").textContent = r ? `${r.skill}: ${r.ok ? "ok" : "not ok"} — ${r.detail}${r.verdict ? " · vision check: " + r.verdict : ""}` : "—";
+    const key = `${s.hasBefore}${s.hasAfter}${s.lastCommand?.at}${r?.at}`;
+    if (key !== lastImgKey) { lastImgKey = key; loadImg("before", $("imgBefore")); loadImg("after", $("imgAfter")); }
+  } catch (e) { $("statusText").textContent = String(e.message || e); }
+}
+setInterval(poll, 1500); poll();
+
+// --- push-to-talk: record, convert to 16 kHz mono WAV (what Whisper expects), send base64
+let rec = null, chunks = [];
+async function startRec() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  rec = new MediaRecorder(stream); chunks = [];
+  rec.ondataavailable = (e) => chunks.push(e.data);
+  rec.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    const buf = await new Blob(chunks).arrayBuffer();
+    const ctx = new AudioContext(); const audio = await ctx.decodeAudioData(buf);
+    const off = new OfflineAudioContext(1, Math.ceil(audio.duration * 16000), 16000);
+    const src = off.createBufferSource(); src.buffer = audio; src.connect(off.destination); src.start();
+    const pcm = (await off.startRendering()).getChannelData(0);
+    send({ audio: wavBase64(pcm, 16000) });
+  };
+  rec.start(); $("mic").classList.add("rec"); $("mic").textContent = "● Listening";
+}
+function stopRec() { if (rec && rec.state === "recording") rec.stop(); $("mic").classList.remove("rec"); $("mic").textContent = "🎙 Talk"; }
+$("mic").addEventListener("pointerdown", startRec);
+$("mic").addEventListener("pointerup", stopRec);
+$("mic").addEventListener("pointerleave", stopRec);
+
+function wavBase64(samples, rate) {
+  const b = new ArrayBuffer(44 + samples.length * 2), v = new DataView(b);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 0x7fff, true);
+  let s = ""; const u = new Uint8Array(b); for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+</script>
+</body>
+</html>

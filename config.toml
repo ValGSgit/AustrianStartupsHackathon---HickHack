@@ -49,3 +49,25 @@ batch_size = 8                        # 1 camera: 8 fits (~2.0 GB, ~0.48 s/step)
 use_amp = false                       # fp16 is ~5x SLOWER on a GTX 1650 (no tensor cores). true on RTX cards.
 save_freq = 5000
 num_workers = 2                       # dataloader workers (video decoding); raise if GPU util is low
+
+# ---------------------------------------------------------------------------------------------
+# Skills the Cloudflare router may choose from (host/robot_agent.py sends name + description).
+# The LLM picks ONLY from this list - write descriptions as if explaining the skill to a person.
+#   policy / duration_s     -> real arm: robot.py rollout --policy <policy>
+#   replay_*                -> real arm: robot.py replay (exact recorded movement)
+#   sim_policy / sim_motion -> used when the agent runs with --sim
+[skills.pick_pen]
+description = "Picks up the pen lying on the table and lifts it up."
+policy = "act_pick_pen"
+duration_s = 25
+sim_policy = "outputs/train/act_sim_pick_pen/checkpoints/last/pretrained_model"
+
+[skills.wave]
+description = "Waves hello at the audience."
+replay_dataset = "moves_wave"
+replay_episode = 0
+sim_motion = "wave"
+
+[skills.reset_scene]
+description = "Simulation only: puts a new pen on the table at a random spot."
+sim_motion = "reset"
