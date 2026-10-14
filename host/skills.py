@@ -39,7 +39,14 @@ GRIP_CLOSED_CMD = 0.0
 HOLD_MIN = 4.0  # gripper reading above this after closing = something is between the jaws
 MAX_STEPS = 15
 LIFT = 0.06  # m above the grasp height
-RELEASE_CMD = 15.0  # gripper opening for letting go
+MAX_STEP_UNITS = 6.0  # per 30 Hz tick; go() stretches faster moves (RealArm hard-caps at 8)
+
+
+def release_cmd(width_m: float) -> float:
+    """Gripper command whose jaw gap is the object's width + ~2 cm: wide enough to let go (a cube stuck in a 15
+    opening and was carried away again), small enough that the swinging jaw doesn't shove it (a pen at 55 did).
+    Jaw gap at the fingertips ~ 0.6 cm + 0.155 cm per unit (measured in the MuJoCo model, commands 0..40)."""
+    return float(np.clip((width_m + 0.02 - 0.006) / 0.00155, 12, 40))
 ROLL_SIGN = 1.0  # +wrist_roll turns the object counter-clockwise seen from above (checked in the sim)
 
 # Catalogue the planner sees. Keep it in sync with SKILLS below (run_plan checks every field).
@@ -52,6 +59,8 @@ CATALOG = [
     {"skill": "rotate", "args": {"object": "id", "degrees": "-180..180"},
      "does": "pick it up, turn it by that many degrees (positive = counter-clockwise seen from above), put it back"},
     {"skill": "move", "args": {"object": "id", "x": "cm", "y": "cm"}, "does": "carry the object to x,y (cm)"},
+    {"skill": "put", "args": {"object": "id", "box": "letter"},
+     "does": "put the object into one of the boxes printed on the sheet (A, B, C far row; D, X, Z near row)"},
     {"skill": "stack", "args": {"object": "id", "onto": "id"}, "does": "put the object on top of another object"},
     {"skill": "point", "args": {"object": "id"}, "does": "point at the object with the closed gripper for 2 s"},
     {"skill": "wave", "args": {}, "does": "wave hello"},
@@ -138,7 +147,8 @@ class Arm:
         """Minimum-jerk move from the last commanded target to `target` (6 values)."""
         target = np.asarray(target, np.float32)
         start = self.cmd if self.cmd is not None else self.state()
-        n = max(1, round(seconds * FPS))
+        # minimum-jerk peaks at 1.875x the average speed: size n so the fastest tick stays under MAX_STEP_UNITS
+        n = max(1, round(seconds * FPS), math.ceil(1.875 * float(np.abs(target - start).max()) / MAX_STEP_UNITS))
         for i in range(1, n + 1):
             if self.stop is not None and self.stop.is_set():
                 raise SkillError("stopped")
@@ -178,6 +188,33 @@ class SimArm(Arm):
     def is_holding(self) -> bool:
         # the sim's finger pads are separate boxes, so its gripper joint closes fully even on a pen: use physics
         return self.env.object_height() > 0.02
+
+
+class DryArm(Arm):
+    """No physics, no hardware: every commanded target is recorded and 'reached' at once. For predicting and
+    measuring a plan before the arm moves (host/validate_move.py)."""
+
+    def __init__(self, frame_bgr: np.ndarray, start: np.ndarray | None = None):
+        super().__init__(Kinematics())
+        self.frame = frame_bgr
+        self.cmd = np.array(LOOK if start is None else start, np.float32)
+        self.trace: list[np.ndarray] = []
+        self.events: list[tuple[int, str]] = []  # (tick, label) e.g. grasp / release, filled in by Skills
+
+    def state(self):
+        return self.cmd.copy()
+
+    def tick(self, target):
+        self.trace.append(np.array(target, np.float32))
+
+    def image(self):
+        return self.frame
+
+    def is_holding(self) -> bool:
+        return True  # assume the grasp works; the physics check is the sim run
+
+    def close(self):
+        pass
 
 
 class RealArm(Arm):
@@ -266,6 +303,10 @@ class Skills:
             raise SkillError(f"lost sight of the {obj.color} {obj.shape} object")
         return best
 
+    def _mark(self, label: str) -> None:
+        if hasattr(self.arm, "events"):
+            self.arm.events.append((len(self.arm.trace), label))
+
     # ---- motion helpers
     def travel(self, target, seconds: float = 1.5) -> None:
         """Move without sweeping over the table: fold up at the current heading, turn, then unfold to target.
@@ -308,10 +349,14 @@ class Skills:
         # Fixed jaw (at the site) right beside the object, moving jaw opened wide (55: its tip is above the
         # fingertips and closes down-and-in). In the MuJoCo model this lifts a pen 6/6 with exact positions and
         # tolerates ~5 mm of error; centring the object in a narrower gap failed (the angled jaw pushes it under).
-        w = o.width * 0.65  # the camera also sees one side: blobs look ~1.5x wider than the object
+        # Full blob width, not shrunk: tall objects look ~1.5x too wide (side view), flat ones (disc) do not, and
+        # a fixed jaw that lands too far out still sweeps the object in, one that lands too close lands ON it.
+        w = o.width
         half_w = float(np.clip(w / 2, 0.004, 0.02))
         open_cmd = 55.0 if w < 0.02 else 75.0
-        z = 0.008 if o.width < 0.02 else min(0.012 + (o.width - 0.02) / 2, 0.02)  # site height at the grasp
+        # Site height at the grasp: fingertips ~2 mm above the table. One camera can't tell an object's height (a
+        # flat 8 mm disc and a 3 cm cube look alike from above), and the 4 cm pads hold tall objects low too.
+        z = 0.008
         best = None
         for flip in (1.0, -1.0):
             a = o.yaw + math.pi / 2
@@ -341,6 +386,7 @@ class Skills:
         self.travel(self._target(q_pre, open_cmd), 1.2)
         self.arm.go(self._target(q_g, open_cmd), 0.8)
         self.arm.go(self._target(q_g, GRIP_CLOSED_CMD), 0.5)
+        self._mark("grasp")
         self.arm.hold(0.3)
         self.arm.go(self._target(q_up, GRIP_CLOSED_CMD), 0.9)
         self.arm.hold(0.2)
@@ -348,32 +394,40 @@ class Skills:
             self.arm.go(self._target(q_up, open_cmd), 0.4)
             raise SkillError(f"missed object #{o.id} (gripper closed on nothing)")
         self.holding = o
-        self.grasp = (c, q_g, z, open_cmd)
+        self.grasp = (c, q_g, z, open_cmd, float(np.hypot(o.x - gx, o.y - gy)))  # off = object centre - site
 
     def place(self, x: float, y: float, z_extra: float = 0.0, roll_deg: float = 0.0) -> None:
         if not self.holding:
             raise SkillError("not holding anything")
         check_reach(x, y)
-        c, q_g, z, open_cmd = self.grasp
-        seed = rad_to_lerobot(np.append(q_g, 0))
-        q_up = self._arm_q(x, y, z + z_extra + LIFT, c, seed)
-        q_down = self._arm_q(x, y, z + z_extra + 0.001, c, seed)  # set it down, don't drop it: round pens roll
+        c, q_g, z, open_cmd, off = self.grasp
+        # The object turns with the wrist (about the vertical) and sits `off` beside the site along the jaw axis:
+        # put the OBJECT centre on (x, y), not the fingertip (that left a cube 2 cm off the box centre).
+        a = math.radians(roll_deg)
+        c_now = np.array([c[0] * math.cos(a) - c[1] * math.sin(a), c[0] * math.sin(a) + c[1] * math.cos(a), 0.0])
+        sx, sy = x - c_now[0] * off, y - c_now[1] * off
+        roll = self._roll_after(q_g[4], roll_deg)
+        if roll is None:
+            raise SkillError(f"wrist can't turn {roll_deg:.0f} deg from here")
+        q0 = q_g.copy()
+        q0[4] = roll  # seed IK with the wrist already turned: a 180 deg jaw-axis error would otherwise stall IK
+        seed = rad_to_lerobot(np.append(q0, 0))
+        q_up = self._arm_q(sx, sy, z + z_extra + LIFT, c_now, seed)
+        # set it down, don't drop it. (Pressing 3 mm into the table flung pens away in the sim; a perfectly round
+        # sim pen can still roll off after release - flat objects like the eraser don't.)
+        q_down = self._arm_q(sx, sy, z + z_extra + 0.001, c_now, seed)
         if roll_deg:
-            # Turn on the wrist_roll joint itself (the approach axis is vertical, so the object turns about the
-            # vertical). Not via IK: for 180 deg the jaw-axis error is antiparallel and IK wouldn't move.
-            roll = self._roll_after(q_up[4], roll_deg)
-            if roll is None:
-                raise SkillError(f"wrist can't turn {roll_deg:.0f} deg from here")
-            q_up[4] = q_down[4] = roll
             self.arm.go(self._target(q_up, GRIP_CLOSED_CMD), 2.0)  # visible turn in the air
         else:
             self.arm.go(self._target(q_up, GRIP_CLOSED_CMD), 1.4)
         self.arm.go(self._target(q_down, GRIP_CLOSED_CMD), 0.8)
         # release with a small opening: opened wide, the moving jaw's tip swings down-and-out on its arc and
         # shoves the object several cm (seen in the sim)
-        self.arm.go(self._target(q_down, RELEASE_CMD), 0.8)
+        self._mark("release")
+        rel = release_cmd(self.holding.width)
+        self.arm.go(self._target(q_down, rel), 0.8)
         self.arm.hold(0.3)
-        self.arm.go(self._target(q_up, RELEASE_CMD), 0.8)
+        self.arm.go(self._target(q_up, rel), 0.8)
         self.holding = None
 
     def turn_in_place(self, o: workspace.Obj, degrees: float) -> workspace.Obj:
@@ -451,6 +505,11 @@ def validate(plan: list[dict], object_ids: set[int]) -> list[dict]:
                 step[key] = _num(step, key, -40, 40)
             elif key == "degrees":
                 step[key] = _num(step, key, -180, 180)
+            elif kind == "letter":
+                letter = str(step.get(key, "")).strip().upper().replace("BOX ", "")
+                if letter not in workspace.BOXES:
+                    raise SkillError(f"there is no box '{step.get(key)}' (boxes: {', '.join(workspace.BOXES)})")
+                step[key] = letter
         times = int(_num(step, "times", 1, 5)) if "times" in step else 1
         out += [{k: v for k, v in step.items() if k != "times"} for _ in range(times)]
     if len(out) > MAX_STEPS:
@@ -489,6 +548,9 @@ def run_plan(sk: Skills, plan: list[dict], log=print) -> tuple[bool, str]:
             elif name == "move":
                 sk.pick(obj)
                 sk.place(st["x"] / 100, st["y"] / 100)
+            elif name == "put":
+                sk.pick(obj)
+                sk.place(*workspace.box_centre(st["box"]))
             elif name == "stack":
                 onto = known[st["onto"]] = sk.track(known[st["onto"]]) if not sk.holding else known[st["onto"]]
                 sk.pick(obj)

@@ -67,7 +67,11 @@ OBJECTS = {
     "pen": '<geom name="obj" type="capsule" size="0.006 0.065" euler="0 1.5708 0" rgba="0.1 0.3 0.85 1" '
     'mass="0.015" friction="1.5 0.01 0.001" condim="4" solref="0.006 1"/>',
 }
-OBJ_REST_Z = {"cube": 0.0125, "pen": 0.006}
+# Flat orange eraser like the one on the team's table (3 x 3 cm, 8 mm thick). A box, not a cylinder: a thin light
+# MuJoCo cylinder sank into the table when the finger pads pressed on it.
+OBJECTS["disc"] = ('<geom name="obj" type="box" size="0.015 0.015 0.004" rgba="0.95 0.45 0.1 1" '
+                   'mass="0.008" friction="1.5 0.01 0.001" condim="4" solref="0.006 1"/>')
+OBJ_REST_Z = {"cube": 0.0125, "pen": 0.006, "disc": 0.004}
 
 MAT_GEOM = ('<geom name="mat" type="box" pos="0.18 0 0.0005" size="0.12 0.16 0.0005" material="mat" '
             'contype="0" conaffinity="0"/>')

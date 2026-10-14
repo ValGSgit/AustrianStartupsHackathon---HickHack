@@ -36,6 +36,12 @@ DICT = cv2.aruco.DICT_4X4_50
 _cx = SHEET_X / 2 - MARGIN - MARKER / 2
 _cy = SHEET_Y / 2 - MARGIN - MARKER / 2
 MARKERS = {0: (_cx, _cy), 1: (_cx, -_cy), 2: (-_cx, -_cy), 3: (-_cx, _cy)}
+# Lettered target boxes printed on the sheet (sheet frame centre x, y; side BOX_SIDE). Far row A B C, near row
+# D X Z, each left to right as the robot sees it. A 4.5 cm band across the middle stays free for objects.
+BOX_SIDE = 0.045
+BOXES = {"A": (0.045, 0.065), "B": (0.045, 0.0), "C": (0.045, -0.065),
+         "D": (-0.045, 0.065), "X": (-0.045, 0.0), "Z": (-0.045, -0.065)}
+BOX_GREY = 185  # light enough that the object detector (< 72 % of paper brightness) ignores the print
 # Default placement: sheet centre 20 cm in front of the shoulder, square to the robot (near edge at 9.5 cm).
 DEFAULT_POSE = {"x": 0.20, "y": 0.0, "yaw": 0.0}
 MM = 1e-3
@@ -66,6 +72,15 @@ def sheet_image(px_per_m: float = 300 / 0.0254) -> np.ndarray:
         cv2.line(img, (c, H // 2 - 15), (c, H // 2 + 15), 225, 2)
         if abs(k) < 2:
             cv2.line(img, (W // 2 - 15, r), (W // 2 + 15, r), 225, 2)
+    for letter, (bx, by) in BOXES.items():
+        h = BOX_SIDE / 2
+        c0, r0 = round(W / 2 - (by + h) * px_per_m), round(H / 2 - (bx + h) * px_per_m)
+        c1, r1 = round(W / 2 - (by - h) * px_per_m), round(H / 2 - (bx - h) * px_per_m)
+        t = max(2, round(0.0008 * px_per_m))
+        cv2.rectangle(img, (c0, r0), (c1, r1), BOX_GREY, t)
+        scale = BOX_SIDE * px_per_m / 60
+        (tw, th), _ = cv2.getTextSize(letter, cv2.FONT_HERSHEY_SIMPLEX, scale, 2 * t)
+        cv2.putText(img, letter, ((c0 + c1 - tw) // 2, (r0 + r1 + th) // 2), cv2.FONT_HERSHEY_SIMPLEX, scale, BOX_GREY, 2 * t)
     cv2.putText(img, "ROBOT THIS SIDE  -  print at 100% (marker squares = 40 mm)", (round(W * 0.28), H - 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, 160, 2)
     return img
@@ -84,6 +99,18 @@ def sheet_to_robot(pts: np.ndarray, pose: dict) -> np.ndarray:
     c, s = math.cos(pose["yaw"]), math.sin(pose["yaw"])
     pts = np.asarray(pts, np.float64).reshape(-1, 2)
     return np.stack([pose["x"] + c * pts[:, 0] - s * pts[:, 1], pose["y"] + s * pts[:, 0] + c * pts[:, 1]], 1)
+
+
+def box_polygon(letter: str, pose: dict | None = None) -> np.ndarray:
+    """Corners (4, 2) of a printed box in the robot frame."""
+    bx, by = BOXES[letter]
+    h = BOX_SIDE / 2
+    return sheet_to_robot([(bx + h, by + h), (bx + h, by - h), (bx - h, by - h), (bx - h, by + h)], pose or load_pose())
+
+
+def box_centre(letter: str, pose: dict | None = None) -> tuple[float, float]:
+    (x, y), = sheet_to_robot([BOXES[letter]], pose or load_pose())
+    return float(x), float(y)
 
 
 def pose_from_touches(touched: dict[int, tuple[float, float]]) -> dict:
@@ -136,6 +163,16 @@ class Scene:
     objects: list[Obj]
     H: np.ndarray | None  # camera pixel -> robot (x, y) on the table plane
     annotated: np.ndarray  # BGR image with markers, sheet outline and numbered objects
+    camera: tuple | None = None  # (K, rvec, tvec) robot frame -> image, for drawing 3D paths (cv2.projectPoints)
+    image: np.ndarray | None = None  # the raw frame
+
+    def project(self, pts3: np.ndarray) -> np.ndarray | None:
+        """Robot-frame 3D points (m) -> image pixels; None without a camera estimate."""
+        if self.camera is None:
+            return None
+        K, rv, tv = self.camera
+        px, _ = cv2.projectPoints(np.asarray(pts3, np.float64).reshape(-1, 1, 3), rv, tv, K, np.zeros(5))
+        return px.reshape(-1, 2)
 
     def text(self) -> str:
         if not self.ok:
@@ -169,7 +206,7 @@ def _color_name(bgr: np.ndarray) -> str:
     return "red"
 
 
-def camera_position(img_pts: np.ndarray, rob_pts: np.ndarray, size: tuple[int, int]) -> np.ndarray | None:
+def camera_model(img_pts: np.ndarray, rob_pts: np.ndarray, size: tuple[int, int]) -> tuple | None:
     """Camera centre in the robot frame (m) from the marker corners: one-view calibration with only the focal
     length free (webcams: centred principal point, square pixels, distortion ignored). Used for parallax."""
     w, h = size
@@ -183,7 +220,7 @@ def camera_position(img_pts: np.ndarray, rob_pts: np.ndarray, size: tuple[int, i
         return None
     R, _ = cv2.Rodrigues(rv[0])
     c = (-R.T @ tv[0]).reshape(3)
-    return c if c[2] > 0.05 else None
+    return (c, (K, rv[0], tv[0])) if c[2] > 0.05 else None
 
 
 def look(bgr: np.ndarray, pose: dict | None = None, min_area_mm2: float = 40.0) -> Scene:
@@ -205,7 +242,8 @@ def look(bgr: np.ndarray, pose: dict | None = None, min_area_mm2: float = 40.0) 
     if H is None:
         return Scene(False, "homography failed", found, [], None, out)
     cv2.aruco.drawDetectedMarkers(out, corners, ids)
-    cam = camera_position(img_pts, rob_pts, (bgr.shape[1], bgr.shape[0])) if len(found) >= 2 else None
+    model = camera_model(img_pts, rob_pts, (bgr.shape[1], bgr.shape[0])) if len(found) >= 2 else None
+    cam = model[0] if model else None
 
     # Rectified top-down view of the sheet, 1 px = 1 mm: pixel (col, row) <-> sheet (x, y)
     W, Hh = round(SHEET_Y / MM), round(SHEET_X / MM)
@@ -264,12 +302,17 @@ def look(bgr: np.ndarray, pose: dict | None = None, min_area_mm2: float = 40.0) 
         p_img = cv2.perspectiveTransform(np.array([[[rx, ry]]], np.float64), Hinv).reshape(2)
         objs.append(Obj(len(objs) + 1, float(rx), float(ry), float(yaw), float(L), float(Wd), color, shape,
                         (int(p_img[0]), int(p_img[1]))))
+    for letter in BOXES:  # printed target boxes, as the robot believes they are
+        poly = cv2.perspectiveTransform(box_polygon(letter, pose).reshape(-1, 1, 2), Hinv).reshape(-1, 2)
+        cv2.polylines(out, [poly.astype(np.int32)], True, (200, 120, 0), 1)
+        c = poly.mean(0).astype(int)
+        cv2.putText(out, letter, (c[0] - 6, c[1] + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 120, 0), 1)
     for o in objs:  # numbered labels: the vision model names objects by these numbers
         cv2.circle(out, o.px, 16, (255, 255, 255), -1)
         cv2.circle(out, o.px, 16, (0, 0, 0), 2)
         cv2.putText(out, str(o.id), (o.px[0] - 8, o.px[1] + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
     cam_txt = f", camera at ({cam[0] * 100:.0f}, {cam[1] * 100:.0f}, {cam[2] * 100:.0f}) cm" if cam is not None else ""
-    return Scene(True, f"{len(found)}/4 markers{cam_txt}", found, objs, H, out)
+    return Scene(True, f"{len(found)}/4 markers{cam_txt}", found, objs, H, out, model[1] if model else None, bgr)
 
 
 def main() -> None:
