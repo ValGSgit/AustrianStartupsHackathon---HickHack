@@ -8,3 +8,6 @@ wandb/
 *.log
 config.local.toml
 sim/model/
+__pycache__/
+shellgame/poses_fake.json
+shellgame/vision_last.jpg
