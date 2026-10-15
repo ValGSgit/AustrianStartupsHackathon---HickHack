@@ -29,7 +29,24 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "sim"), str(ROOT / "host"), str(ROOT)]
 
 import workspace  # noqa: E402
-from so101_sim.env import FPS, MODEL_DIR, ROBOT_XML, lerobot_to_rad, rad_to_lerobot  # noqa: E402
+from so101_sim.env import ARM_HALF_RANGE, FPS, MODEL_DIR, ROBOT_XML, lerobot_to_rad, rad_to_lerobot  # noqa: E402
+
+# Skills work in the sim's units (arm joints -100..100 over the MJCF joint range, wrist_roll -100..100 = -180..180
+# deg, gripper 0..100). LeRobot 0.6.1's SO101 reports and takes DEGREES for the 5 arm joints (use_degrees=True,
+# 0 = middle of the calibrated range) and 0..100 for the gripper. Convert at the hardware boundary.
+_HALF_DEG = np.append(np.degrees(ARM_HALF_RANGE), 180.0)
+
+
+def units_to_deg(u: np.ndarray) -> np.ndarray:
+    out = np.asarray(u, np.float64).copy()
+    out[:5] = out[:5] / 100.0 * _HALF_DEG
+    return out
+
+
+def deg_to_units(d: np.ndarray) -> np.ndarray:
+    out = np.asarray(d, np.float64).copy()
+    out[:5] = out[:5] / _HALF_DEG * 100.0
+    return out.astype(np.float32)
 
 # Poses in LeRobot units: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
 LOOK = np.array([70.0, -90.0, 60.0, 90.0, 0.0, 2.0], np.float32)  # folded up and turned aside: sheet in full view
@@ -222,6 +239,7 @@ class RealArm(Arm):
     30 Hz step, so even a wrong target can't make the arm jump."""
 
     def __init__(self, on_frame=None, stop=None, max_step: float = 8.0, camera: bool = True):
+        # max_step: degrees per 30 Hz tick (LeRobot's max_relative_target, in the robot's own units)
         from robot import CALIB_DIR, CONFIG
         from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
@@ -245,10 +263,10 @@ class RealArm(Arm):
 
     def state(self):
         obs = self.robot.bus.sync_read("Present_Position")
-        return np.array([obs[n[:-4]] for n in self.names], np.float32)
+        return deg_to_units(np.array([obs[n[:-4]] for n in self.names]))
 
     def tick(self, target):
-        self.robot.send_action({n: float(v) for n, v in zip(self.names, target)})
+        self.robot.send_action({n: float(v) for n, v in zip(self.names, units_to_deg(target))})
         self.n += 1
         if self.on_frame is not None and self.n % 3 == 0:
             self.on_frame(self.cam.rgb() if self.cam else None, None, target)
@@ -653,8 +671,8 @@ def teach_sheet() -> None:
             if ans == "s":
                 continue
             obs = robot.bus.sync_read("Present_Position")
-            q = np.array([obs[j] for j in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex",
-                                             "wrist_roll", "gripper")], np.float32)
+            q = deg_to_units(np.array([obs[j] for j in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex",
+                                                          "wrist_roll", "gripper")]))
             pos, _ = kin.fk(q)
             touched[mid] = (float(pos[0]), float(pos[1]))
             print(f"  marker {mid}: x={pos[0] * 100:.1f} y={pos[1] * 100:.1f} z={pos[2] * 100:.1f} cm")
