@@ -301,18 +301,26 @@ def cmd_sample(a):
             done = follow_steps(arm, leader, typed, list(KINDS), got.get,
                                 lambda k, p: got.__setitem__(k, {j: round(float(p[j]), 2) for j in A.KEYS}), a.hand)
             torque(arm, True)
-            if len(got) == len(KINDS):
-                samples = load_samples() + [{"uv": list(uv), "frame_size": size, "poses": got}]
-                save_samples(samples)
-                print(f"\nsample {len(samples)} saved at {uv[0]:.0f},{uv[1]:.0f}; move the cup to a new place and run "
-                      "sample again (6-8 samples spread over the whole cup area)")
-            else:
-                print(f"\nsample NOT saved (missing {', '.join(k for k in KINDS if k not in got)})")
             if "grip" in got and "above" in got:  # put the cup down, let go, back up
                 o = got["above"]["gripper.pos"]
                 A.go_to(arm, got["grip"], 1.5)
                 A.go_to(arm, A.with_gripper(got["grip"], o), 0.7)
                 A.go_to(arm, got["above"], 1.0)
+            if len(got) == len(KINDS):
+                # look again: the cup now stands exactly where the taught grip pose puts it, which is the position
+                # these poses belong to (the cup can be bumped or slide while teaching)
+                A.go_to(arm, ready, 2.5)
+                again = see_one_cup(a, setup, typed)
+                if again is not None:
+                    shift = ((again[0][0] - uv[0]) ** 2 + (again[0][1] - uv[1]) ** 2) ** 0.5
+                    print(f"cup put down at u={again[0][0]:.0f}, v={again[0][1]:.0f} ({shift:.0f} px from the start)")
+                    uv, size = again
+                samples = load_samples() + [{"uv": list(uv), "frame_size": size, "poses": got}]
+                save_samples(samples)
+                print(f"\nsample {len(samples)} saved at {uv[0]:.0f},{uv[1]:.0f}; move the cup to a new place and run "
+                      "sample again")
+            else:
+                print(f"\nsample NOT saved (missing {', '.join(k for k in KINDS if k not in got)})")
             if not done:
                 break
         print(f"\n{len(load_samples())} samples in {SAMPLES_FILE.name}. Next: reach.py check")
