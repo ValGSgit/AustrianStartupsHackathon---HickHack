@@ -49,12 +49,34 @@ def solve(uv: np.ndarray, y: np.ndarray) -> tuple:
     X = features((uv - c) / sc, n_terms(len(uv)))
     D = np.eye(X.shape[1]) * RIDGE
     D[0, 0] = 0.0
-    return c, sc, np.linalg.solve(X.T @ X + D, X.T @ y)
+    coef = np.linalg.solve(X.T @ X + D, X.T @ y)
+    # + thin-plate spline on what the polynomial misses: the model then hits every taught sample exactly
+    # (a cup on a taught spot gets exactly the taught pose) and bends smoothly in between
+    pts = (uv - c) / sc
+    resid = y - X @ coef
+    K = tps(pts, pts) + np.eye(len(pts)) * TPS_SMOOTH
+    P = np.c_[np.ones(len(pts)), pts]
+    A = np.block([[K, P], [P.T, np.zeros((3, 3))]])
+    sol = np.linalg.solve(A, np.r_[resid, np.zeros((3, resid.shape[1]))])
+    return c, sc, coef, pts, sol
+
+
+TPS_SMOOTH = 1e-4
+
+
+def tps(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    r2 = ((a[:, None, :] - b[None, :, :]) ** 2).sum(-1)
+    return np.where(r2 > 0, 0.5 * r2 * np.log(np.maximum(r2, 1e-12)), 0.0)
 
 
 def apply(fit: tuple, uv: np.ndarray) -> np.ndarray:
-    c, sc, coef = fit
-    return features((uv - c) / sc, coef.shape[0]) @ coef
+    c, sc, coef = fit[:3]
+    q = (uv - c) / sc
+    out = features(q, coef.shape[0]) @ coef
+    if len(fit) == 5:
+        pts, sol = fit[3], fit[4]
+        out = out + tps(q, pts) @ sol[:len(pts)] + np.c_[np.ones(len(q)), q] @ sol[len(pts):]
+    return out
 
 
 class ReachModel:
