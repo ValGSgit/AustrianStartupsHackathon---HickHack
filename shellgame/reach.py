@@ -251,9 +251,12 @@ def cmd_go_cup(a):
     except BaseException:
         A.release(arm)
         raise
-    above = p["above"]
-    run_steps(arm, [("above", above), ("grip (open)", A.with_gripper(p["grip"], above["gripper.pos"])),
-                    ("above", above), ("ready", ready)])
+    above, opened, closed = p["above"], p["above"]["gripper.pos"], p["grip"]["gripper.pos"]
+    steps = [("above", above), ("grip (open)", A.with_gripper(p["grip"], opened))]
+    if a.lift:  # the full reveal: close on the cup, lift it, put it back, let go
+        steps += [("grip (CLOSE)", p["grip"]), ("lift", A.with_gripper(p["lift"], closed)),
+                  ("put back", p["grip"]), ("open", A.with_gripper(p["grip"], opened))]
+    run_steps(arm, steps + [("above", above), ("ready", ready)])
 
 
 def main():
@@ -270,6 +273,7 @@ def main():
     s.add_argument("--image", help="use a saved image instead of the camera")
     s.add_argument("--camera", type=int, help="override the [cameras.front] index from config")
     s.add_argument("--setup", help="vision setup JSON (default shellgame/vision_setup.json)")
+    s.add_argument("--lift", action="store_true", help="also close the gripper, lift the cup, put it back")
     s.set_defaults(fn=cmd_go_cup)
     for s in sub.choices.values():
         s.add_argument("--fake", action="store_true", help="no arm (FakeArm)")
