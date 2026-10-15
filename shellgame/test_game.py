@@ -98,7 +98,7 @@ def test_fake_arm_motions():
     arm.send_action = lambda a, f=arm.send_action: (sent.append(dict(a)), f(a))[1]
     M.move_cup(arm, poses, 2, 4)
     grips = [a["gripper.pos"] for a in sent]
-    assert min(grips) == poses["grip_2"]["gripper.pos"] and max(grips) <= poses["above_2"]["gripper.pos"]
+    assert min(grips) == M.held(M.slot_poses(poses, 2)) and max(grips) <= poses["above_2"]["gripper.pos"]
     assert grips[-1] == poses["above_4"]["gripper.pos"]
 
 
