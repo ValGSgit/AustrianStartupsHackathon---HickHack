@@ -4,6 +4,7 @@
     .venv\\Scripts\\python shellgame\\show.py --moves 5 --speed 1.3 --fullscreen
     .venv\\Scripts\\python shellgame\\show.py --fake --no-vision --moves 3 --auto   # no hardware, one game, no keys
     .venv\\Scripts\\python shellgame\\show.py --seen                     # camera-guided: grab cups where they are seen
+    .venv\\Scripts\\python shellgame\\show.py --act-reveal               # reveal = learned ACT policy (newest checkpoint)
 
 The robot runs in a worker thread; the window stays live. ESC sets a stop flag: the next servo command is not sent
 and the arm holds where it is (torque stays on). q goes home slowly and switches the motors off.
@@ -48,6 +49,10 @@ class Show:
         self.worker: threading.Thread | None = None
         self.cap = None
         self.plan = None                         # --seen: (cups, src_uv, dst_uv, found, frame size) drawn on screen
+        self.cap_lock = threading.Lock()         # --act-reveal: the worker releases/reopens the camera
+        self.act_live = False                    # --act-reveal running: show the rollout's camera frames
+        self.arm = None
+        self.send = None                         # the arm's unguarded send_action
 
     # ------------------------------------------------ helpers used by the worker
     def set(self, title, color, sub=""):
@@ -158,7 +163,10 @@ class Show:
         self.set("Watch the ball", AMBER, f"the ball is under cup {start}")
         self.say(f"Watch closely. The ball is under cup {start}.")
         M.go_ready(self.arm, self.poses)
-        self.reveal_fn(s, start)()
+        if self.a.act_reveal and self.a.act_show_ball:
+            self.act_lift(s, start)
+        else:
+            self.reveal_fn(s, start)()
         self.plan = None
         for k, move in enumerate(moves, 1):
             self.set(f"Shuffling {k}/{len(moves)}", AMBER, "keep your eyes on the ball")
@@ -193,6 +201,9 @@ class Show:
     def reveal(self, s, slot):
         """Lift the cup; meanwhile watch for the ball near that slot. Returns (verified or None, max ball px)."""
         import vision as V
+        if self.a.act_reveal:
+            self.act_lift(s, slot)
+            return None, 0  # no ball check after a learned reveal
         lift = self.reveal_fn(s, slot)
         if not self.vision:
             lift()
@@ -219,6 +230,68 @@ class Show:
         if err:
             raise err[0]
         return hits >= 3, best
+
+    # ------------------------------------------------ --act-reveal: the learned policy lifts the cup
+    def attach_arm(self, arm):
+        """Use `arm`, wrapping its send_action: ESC stops issuing commands, the arm holds its last goal."""
+        send = arm.send_action
+
+        def guarded(action):
+            if self.stop.is_set():
+                raise Stopped
+            if self.a.fake:
+                time.sleep(1 / A.FPS / 4)  # fake: 4x real time, so the screen can be watched
+            return send(action)
+        arm.send_action = guarded
+        self.arm, self.send = arm, send
+
+    def act_lift(self, s, slot):
+        """Hand the COM port + camera to a lerobot-rollout of the ACT policy, take them back, go to ready.
+        If the rollout crashes (exit code != 0, not ESC), the scripted reveal of `slot` runs instead."""
+        import act_reveal as R
+        import motions as M
+        a = self.a
+        self.set("Neural network", AMBER, "neural network (ACT)\nis picking up the cup\nESC = stop")
+        self.say("Now my neural network picks up the cup.")
+        A.release(self.arm)  # slowly home (= the episodes' start pose), torque off, COM port free
+        self.arm.send_action = self.send
+        self.arm = None
+        had_cam = self.cap is not None
+        with self.cap_lock:
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+        self.act_live = True
+        try:
+            code = R.run_act_reveal(a.act_reveal, a.act_duration, a.act_n_action_steps, mock=a.fake,
+                                    stop=self.stop, camera=had_cam)
+        finally:
+            self.act_live = False
+            self.attach_arm(A.connect(fake=a.fake))  # torque on: holds wherever the rollout left it
+            if had_cam:
+                self.reopen_camera()
+        if self.stop.is_set():
+            raise Stopped
+        if code != 0:
+            print(f"ACT rollout failed (exit {code}): scripted reveal instead", flush=True)
+            self.set("Lifting the cup", AMBER, "scripted reveal (ACT failed)")
+            M.go_ready(self.arm, self.poses)
+            self.reveal_fn(s, slot)()
+        M.go_ready(self.arm, self.poses)
+
+    def reopen_camera(self):
+        import selfcheck
+        for attempt in range(5):  # the rollout process may need a moment to let go of the webcam
+            try:
+                cap = selfcheck.open_camera()
+            except SystemExit as e:
+                print(f"camera reopen {attempt + 1}/5: {e}", flush=True)
+                time.sleep(0.5)
+                continue
+            with self.cap_lock:
+                self.cap = cap
+            return
+        print("camera did not reopen: continuing without it", flush=True)
 
     def run_game(self):
         try:
@@ -253,24 +326,17 @@ class Show:
         elif self.vision:
             import vision as V
             self.setup = V.load_setup(Path(a.setup) if a.setup else None)
-        cap = None
         if self.vision or (a.seen and not a.fake and not a.mock_camera):
             import selfcheck
-            self.cap = cap = selfcheck.open_camera()
+            self.cap = selfcheck.open_camera()
         seed = a.seed if a.seed is not None else random.randrange(10**6)
         self.rng = random.Random(seed)
         print(f"seed {seed}  speed {a.speed}  moves {a.moves}  vision {'on' if self.vision else 'off'}")
 
-        self.arm = A.connect(fake=a.fake)
-        send = self.arm.send_action
-
-        def guarded(action):  # ESC: stop issuing commands, the arm holds its last goal
-            if self.stop.is_set():
-                raise Stopped
-            if a.fake:
-                time.sleep(1 / A.FPS / 4)  # fake: 4x real time, so the screen can be watched
-            return send(action)
-        self.arm.send_action = guarded
+        if a.act_reveal:
+            print(f"act reveal: {a.act_reveal}  ({a.act_duration} s, n_action_steps {a.act_n_action_steps}"
+                  f"{', also the show-ball' if a.act_show_ball else ''})")
+        self.attach_arm(A.connect(fake=a.fake))
 
         cv2.namedWindow(stage.WIN, cv2.WINDOW_NORMAL)
         if a.fullscreen:
@@ -278,15 +344,18 @@ class Show:
         auto_started, auto_done_at = False, None
         try:
             while True:
-                if cap is not None:
-                    ok, f = cap.read()
-                    if ok:
-                        self.frame, self.frame_n = f, self.frame_n + 1
+                with self.cap_lock:
+                    if self.cap is not None:
+                        ok, f = self.cap.read()
+                        if ok:
+                            self.frame, self.frame_n = f, self.frame_n + 1
                 img = self.frame
+                if self.act_live:  # the ACT rollout holds the camera and publishes its frames
+                    img = live_frame(self)
                 if a.mock_camera:
                     img = np.zeros((480, 640, 3), np.uint8)
                     cv2.putText(img, "mock camera", (200, 250), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (150, 150, 150), 2)
-                if img is not None and self.vision:
+                if img is not None and self.vision and not self.act_live:
                     import vision as V
                     img = V.annotate(img, self.setup, V.slot_states(img, self.setup))
                 plan = self.plan
@@ -321,13 +390,27 @@ class Show:
                     self.keys.put(chr(k))
         finally:
             self.stop.clear()
-            self.arm.send_action = send
-            if cap is not None:
-                cap.release()
+            if self.cap is not None:
+                self.cap.release()
             cv2.destroyAllWindows()
-            print("going home, motors off...", flush=True)
-            A.release(self.arm)
+            if self.arm is not None:  # None only while an ACT rollout still holds the port
+                self.arm.send_action = self.send
+                print("going home, motors off...", flush=True)
+                A.release(self.arm)
         return getattr(self, "result", None)
+
+
+def live_frame(show):
+    """Latest frame the ACT rollout wrote to stage.LIVE_FRAME (None until the first one arrives)."""
+    try:
+        mtime = stage.LIVE_FRAME.stat().st_mtime
+    except OSError:
+        return None
+    if mtime != getattr(show, "live_mtime", None):
+        img = cv2.imread(str(stage.LIVE_FRAME))
+        if img is not None:
+            show.live_img, show.live_mtime = img, mtime
+    return getattr(show, "live_img", None)
 
 
 def log(a, ball, guess, verified, problems):
@@ -353,7 +436,19 @@ def main():
     p.add_argument("--seen", action="store_true", help="camera-guided: grab each cup where the camera sees it")
     p.add_argument("--setup", help="vision setup file (default shellgame/vision_setup.json)")
     p.add_argument("--auto", action="store_true", help="testing: auto SPACE, guess 1, exit after one game")
-    result = Show(p.parse_args()).main()
+    p.add_argument("--act-reveal", nargs="?", const="", metavar="PATH",
+                   help="the reveal is done by the ACT policy (pick_cup); PATH = checkpoint folder "
+                        "(default: newest outputs/train/act_pick_cup checkpoint)")
+    p.add_argument("--act-show-ball", action="store_true", help="with --act-reveal: ACT also lifts the cup at the start")
+    p.add_argument("--act-duration", type=int, default=14, help="seconds per ACT rollout")
+    p.add_argument("--act-n-action-steps", type=int, default=20, help="ACT re-plans every N steps")
+    a = p.parse_args()
+    if a.act_reveal == "":
+        import act_reveal as R
+        a.act_reveal = R.latest_checkpoint() or ("fake" if a.fake else None)
+        if a.act_reveal is None:
+            sys.exit(f"--act-reveal: no checkpoint in {R.CHECKPOINTS} - train first or pass a path")
+    result = Show(a).main()
     print(f"result: {result}")
 
 

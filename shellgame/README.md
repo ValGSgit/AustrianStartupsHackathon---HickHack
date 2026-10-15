@@ -44,5 +44,28 @@ The camera finds each cup and the arm grabs it where it really is (poses predict
 Spread the 6-8 samples over the whole area the cups can be in (all 4 slots and the inner lane). No hardware:
 `shuffle.py --fake --seen`, `show.py --fake --no-vision --seen --auto`.
 
+## Learned reveal (ACT)
+
+The reveal (lift the cup, hold, put it back) can be done by an ACT policy trained from teleop demos instead of
+taught poses. Dataset `pick_cup`, task "Pick up the cup" (from `config.local.toml`): one cup on the board, the arm
+starts at rest, grabs it, lifts ~8 cm, holds, puts it back, returns to rest. 12 s episodes.
+
+```powershell
+# record (leader + follower + camera), 10 at a time; first run without --resume
+.venv\Scripts\python robot.py record --episodes 10 --no-push
+.venv\Scripts\python robot.py record --episodes 10 --no-push --resume   # repeat until ~50 episodes
+# train -> outputs\train\act_pick_cup\checkpoints\<step>\pretrained_model
+.venv\Scripts\python robot.py train --no-push --steps 6000
+# test the learned reveal alone (arm at rest, cup on the board); default = newest checkpoint
+.venv\Scripts\python shellgame\act_reveal.py
+.venv\Scripts\python shellgame\act_reveal.py --policy outputs\train\act_pick_cup\checkpoints\004000\pretrained_model --duration 14 --n-action-steps 20
+# the show: reveal by the policy (optional PATH; --act-show-ball also for the start)
+.venv\Scripts\python shellgame\show.py --act-reveal --fullscreen
+```
+During the ACT run the show goes home, releases the arm (torque off) and the camera, runs `lerobot-rollout` as a
+subprocess (the screen shows its camera view), then reconnects and goes to `ready`. ESC kills the rollout (the arm
+freezes, torque on). If the rollout crashes, the scripted reveal runs instead. No ball check after an ACT reveal.
+No hardware: `show.py --fake --no-vision --auto --moves 2 --act-reveal fakepath` (waits instead of the rollout).
+
 Every script ends by moving slowly to `home`, then switching the motors off. Re-teach one pose with
 `teach.py teach --only grip_2`. Games are logged to `evals/shell_log.csv`.
