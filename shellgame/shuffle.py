@@ -67,7 +67,10 @@ def fake_cups(setup: dict, s: G.State, rng: random.Random) -> list[dict]:
 def plan(cups: list[dict], setup: dict, size, src: int, dst: int | None = None):
     """(src_uv, dst_uv, found): the detected cup nearest slot src (else its slot centre), dst = slot centre."""
     import vision as V
-    slots = slot_centres(setup, size)
+    # a detected cup's centre (whole visible cup) sits a fixed offset from the clicked spot centre (cup top);
+    # samples were taught in detected-cup coordinates, so spots are converted to them too
+    ox, oy = setup.get("cup_uv_offset", (0, 0))
+    slots = [(x + ox, y + oy, r) for x, y, r in slot_centres(setup, size)]
     x, y, r = slots[src - 1]
     cup = V.nearest_cup(cups, (x, y), SEEN_DIST * r)
     dst_uv = slots[dst - 1][:2] if dst else None
