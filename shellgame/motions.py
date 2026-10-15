@@ -23,6 +23,13 @@ T_PULL = 1.0     # grip <-> in (sliding on the table)
 T_LANE = 1.2     # in_src -> in_dst
 T_UP = 0.8       # grip -> above
 T_LIFT = 1.0     # grip <-> lift
+SQUEEZE = 6.0    # gripper units past the taught grip: a just-touching grip lets the cup slip while sliding.
+                 # Safe: LeRobot limits the SO-101 gripper torque/current.
+
+
+def held(p) -> float:
+    """Gripper value used while holding the cup: the taught grip, squeezed a bit more (0 = fully closed)."""
+    return max(0.0, p["grip"]["gripper.pos"] - SQUEEZE)
 
 
 def required_poses(slots=SLOTS) -> list[str]:
@@ -56,7 +63,7 @@ def slot_poses(poses: dict, i: int) -> dict[str, dict]:
 
 def _grab(arm, p):
     """Current pose -> above -> grip (open) -> grip (closed). p = slot_poses() / model.predict()."""
-    o, c = p["above"]["gripper.pos"], p["grip"]["gripper.pos"]
+    o, c = p["above"]["gripper.pos"], held(p)
     A.go_to(arm, A.with_gripper(p["above"], o), T_TRAVEL)
     A.go_to(arm, A.with_gripper(p["grip"], o), T_DOWN)
     A.go_to(arm, A.with_gripper(p["grip"], c), T_CLOSE)
@@ -71,7 +78,7 @@ def _let_go(arm, p):
 
 def _move(arm, src, dst, ready=None):
     """[ready ->] grab src -> in_src -> in_dst -> grip_dst -> let go -> above_dst. The cup slides on the table."""
-    closed = src["grip"]["gripper.pos"]  # keep the grip used on this cup for the whole slide
+    closed = held(src)  # keep the grip used on this cup for the whole slide
     if ready:
         A.go_to(arm, ready, T_TRAVEL)
     _grab(arm, src)
@@ -83,7 +90,7 @@ def _move(arm, src, dst, ready=None):
 
 def _reveal(arm, p, hold_s):
     """above -> grip -> close -> lift, hold, put back, open, above."""
-    closed = p["grip"]["gripper.pos"]
+    closed = held(p)
     _grab(arm, p)
     A.go_to(arm, A.with_gripper(p["lift"], closed), T_LIFT)
     _hold(arm, hold_s)

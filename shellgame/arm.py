@@ -18,7 +18,7 @@ from pathlib import Path
 # the instructions on screen.
 logging.getLogger().addFilter(lambda r: "Relative goal position magnitude" not in str(r.msg))
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent / "syed"  # robot.py, config.toml, calibration/
 sys.path.insert(0, str(ROOT))
 from robot import CALIB_DIR, CONFIG  # noqa: E402
 

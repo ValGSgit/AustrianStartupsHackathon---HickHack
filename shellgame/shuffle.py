@@ -119,6 +119,7 @@ def main() -> None:
     ap.add_argument("--seen", action="store_true", help="camera-guided: grab each cup where the camera sees it")
     ap.add_argument("--setup", help="vision setup file (default shellgame/vision_setup.json)")
     ap.add_argument("--image", help="--seen: use this still image instead of the camera (testing)")
+    ap.add_argument("--no-check", action="store_true", help="don't check each move with the camera")
     ap.add_argument("--plan", help='fixed moves instead of a game, e.g. "1-3,2-1,3-2" = swap the cups on 1 and 2 '
                                    "via 3 (any number of cups; no ball, no state check)")
     args = ap.parse_args()
@@ -155,6 +156,35 @@ def main() -> None:
               + ("" if found else "  WARNING: no cup seen near the slot, using the slot centre"), flush=True)
         return src_uv, dst_uv, size
 
+    checking = not args.no_check and not args.fake and not args.seen
+
+    def checked_move(src, dst):
+        """Move, then look (arm at ready): cup at dst -> ok; cup still at src -> one retry; else stop."""
+        for attempt in (1, 2):
+            if args.seen:
+                src_uv, dst_uv, size = target(src, dst)
+                M.move_cup_seen(arm, model, src_uv, dst_uv, frame_size=size)
+            else:
+                M.move_cup(arm, poses, src, dst)
+            if not checking:
+                return
+            M.go_ready(arm, poses)
+            import vision as V
+            st = V.slot_states(camera_frame(None), V.load_setup(args.setup and Path(args.setup)))
+            at_src, at_dst = st[src - 1]["occupied"], st[dst - 1]["occupied"]
+            if at_dst and not at_src:
+                if st[dst - 1]["off_center"]:
+                    print(f"  camera: cup on spot {dst} but off its mark {st[dst - 1]['offset']}, pushing it back")
+                    M.nudge(arm, poses, dst)
+                    M.go_ready(arm, poses)
+                print(f"  camera: OK, cup is on spot {dst}", flush=True)
+                return
+            if at_src and not at_dst and attempt == 1:
+                print(f"  camera: MISSED - the cup is still on spot {src}. Trying again.", flush=True)
+                continue
+            raise RuntimeError(f"camera: after {src}->{dst} spot {src} {'has' if at_src else 'has no'} cup, "
+                               f"spot {dst} {'has' if at_dst else 'has no'} cup. Fix the cups and run again.")
+
     arm = A.connect(fake=args.fake)
     if args.plan:
         plan_moves = [tuple(int(x) for x in m.split("-")) for m in args.plan.split(",")]
@@ -162,13 +192,11 @@ def main() -> None:
             for k, (src, dst) in enumerate(plan_moves, 1):
                 if args.slow_test:
                     input(f"Enter = move {k}: {src} -> {dst} ")
-                if args.seen:
-                    src_uv, dst_uv, size = target(src, dst)
-                    M.move_cup_seen(arm, model, src_uv, dst_uv, frame_size=size)
-                else:
-                    M.move_cup(arm, poses, src, dst)
+                checked_move(src, dst)
                 print(f"move {k}: {src} -> {dst}", flush=True)
             M.go_ready(arm, poses)
+        except RuntimeError as e:
+            print(f"STOPPED: {e}")
         except KeyboardInterrupt:
             print("stopped (Ctrl+C)")
         finally:
@@ -186,16 +214,14 @@ def main() -> None:
             if args.slow_test:
                 input(f"Enter = move {k}: {move[0]} -> {move[1]} ")
             ball_moves = move[0] == G.ball_slot(s)
-            if args.seen:
-                src_uv, dst_uv, size = target(*move)
-                M.move_cup_seen(arm, model, src_uv, dst_uv, frame_size=size)
-            else:
-                M.move_cup(arm, poses, *move)
+            checked_move(*move)
             s = G.apply(s, move)
             print(f"move {k}: {move[0]} -> {move[1]}{'  (ball cup)' if ball_moves else ''}"
                   f"   ball in slot {G.ball_slot(s)}, empty {G.empty_slot(s)}", flush=True)
         M.go_ready(arm, poses)
         print(f"done: ball is in slot {G.ball_slot(s)}")
+    except RuntimeError as e:
+        print(f"STOPPED: {e}")
     except KeyboardInterrupt:
         print("\nstopped (Ctrl+C)")
     finally:
