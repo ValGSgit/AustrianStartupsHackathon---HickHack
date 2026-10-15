@@ -119,6 +119,8 @@ def main() -> None:
     ap.add_argument("--seen", action="store_true", help="camera-guided: grab each cup where the camera sees it")
     ap.add_argument("--setup", help="vision setup file (default shellgame/vision_setup.json)")
     ap.add_argument("--image", help="--seen: use this still image instead of the camera (testing)")
+    ap.add_argument("--plan", help='fixed moves instead of a game, e.g. "1-3,2-1,3-2" = swap the cups on 1 and 2 '
+                                   "via 3 (any number of cups; no ball, no state check)")
     args = ap.parse_args()
 
     A.SPEED = 0.4 if args.slow_test else args.speed
@@ -154,6 +156,25 @@ def main() -> None:
         return src_uv, dst_uv, size
 
     arm = A.connect(fake=args.fake)
+    if args.plan:
+        plan_moves = [tuple(int(x) for x in m.split("-")) for m in args.plan.split(",")]
+        try:
+            for k, (src, dst) in enumerate(plan_moves, 1):
+                if args.slow_test:
+                    input(f"Enter = move {k}: {src} -> {dst} ")
+                if args.seen:
+                    src_uv, dst_uv, size = target(src, dst)
+                    M.move_cup_seen(arm, model, src_uv, dst_uv, frame_size=size)
+                else:
+                    M.move_cup(arm, poses, src, dst)
+                print(f"move {k}: {src} -> {dst}", flush=True)
+            M.go_ready(arm, poses)
+        except KeyboardInterrupt:
+            print("
+stopped (Ctrl+C)")
+        finally:
+            A.release(arm)
+        return
     try:
         M.go_ready(arm, poses)
         print(f"showing the ball in slot {G.ball_slot(s)}", flush=True)
