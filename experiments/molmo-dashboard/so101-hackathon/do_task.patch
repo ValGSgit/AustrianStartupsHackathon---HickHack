@@ -1,0 +1,181 @@
+--- ../so101-hackathon/saved_setup/code_before_assist/do_task_before_dashboard.py	2026-10-15 02:02:17
++++ ../so101-hackathon/do_task.py	2026-10-15 02:02:44
+@@ -2,13 +2,16 @@
+ 
+     python do_task.py --pick "paper ball" --into box     # builds the task sentence the way the model was trained
+     python do_task.py --pick pen --onto notebook
++    python do_task.py "put the duck and the chess queen into the cup"   # several objects: one after another
+     python do_task.py "move the arm towards the white pawn, grasp it, lift it up, and drop it into the cup"
+     python do_task.py                     # the task in settings.env (MOLMO_TASK)
+     python do_task.py --seconds 90 ...    # allow longer (default 60 s; Ctrl+C stops early)
+     python do_task.py --check             # only run the checks and save camera previews
+     python do_task.py --fake              # no robot/cameras: test the whole chain with a fake robot
+ 
+-Run it in the Terminal app (macOS only lets Terminal use the cameras).
++Several objects in one instruction are split into one model sentence each (tasks.py) and done in turn; --seconds
++is per object. Under the team dashboard's robot agent (ROBOT_LIVE=1) both cameras stream to its Live panel
++(live_view.py). Run it in the Terminal app (macOS only lets Terminal use the cameras).
+ Cameras: FRONT_CAM (phone, top) is required; SIDE_CAM (USB webcam, side) is optional, see settings.env.
+ Help for the model (assist.py, switch off in settings.env): once the gripper holds the object, the code carries
+ it to the taught drop pose (python teach_drop.py cup) and opens; after a missed grab it opens, lifts and lets the
+@@ -29,6 +32,8 @@
+ import numpy as np
+ 
+ import config
++import live_view
++from tasks import split_tasks
+ 
+ HERE = Path(__file__).parent
+ S = config.S
+@@ -241,14 +246,12 @@
+ 
+     found = config.identify_cameras()
+     print(f"        found: {found or 'no cameras'}")
+-    wanted = {"cam0": ("FRONT", "top camera", True), "cam1": ("SIDE", "side camera", False)}
+-    result = {}
+-    for slot, (prefix, label, required) in wanted.items():
++    wanted = {"cam0": ("FRONT", "top camera"), "cam1": ("SIDE", "side camera")}
++    result, problems = {}, {}
++    for slot, (prefix, label) in wanted.items():
+         setting = S.get(f"{prefix}_CAM", "").strip().lower()
+         if setting == "":
+-            if required:
+-                fail(f"{prefix}_CAM not set", f"set {prefix}_CAM in settings.env (iphone, webcam or a number)")
+-            print(f"  --    no {label} set (optional; {slot} gets a copy of cam0)")
++            problems[slot] = (f"{prefix}_CAM not set", f"set {prefix}_CAM in settings.env (iphone, webcam or a number)")
+             continue
+         if setting.isdigit():
+             idx = int(setting)
+@@ -257,27 +260,45 @@
+         elif setting in found:
+             idx = found[setting]
+         else:
+-            fail(f"{label}: no '{setting}' camera found (found: {list(found) or 'none'})",
+-                 "iPhone: Bluetooth + Wi-Fi on, locked, near the Mac (or by cable). Webcam: is it plugged in? "
+-                 "RealSense: use the name realsense (colour, via realsense_bridge.py)")
++            problems[slot] = (f"{label}: no '{setting}' camera found (found: {list(found) or 'none'})",
++                              "iPhone: Bluetooth + Wi-Fi on, locked, near the Mac (or by cable). Webcam: is it "
++                              "plugged in? RealSense: use the name realsense (colour, via realsense_bridge.py)")
++            continue
++        if any(idx == r[0] for r in result.values()):
++            problems[slot] = ("top and side camera are the same camera", "set FRONT_CAM and SIDE_CAM to different cameras")
++            continue
+         size = (int(S.get(f"{prefix}_WIDTH") or 640), int(S.get(f"{prefix}_HEIGHT") or 480))
+         got, frame, cam = open_camera(idx, size)
+-        if got is None and idx == "realsense":
+-            fail(f"{label}: no picture from the RealSense",
+-                 "start it first in another Terminal tab: sudo .venv/bin/python realsense_bridge.py")
+         if got is None:
+-            fail(f"{label} (camera {idx}) does not open", "allow camera access for Terminal; check with python cam_test.py")
++            problems[slot] = ((f"{label}: no picture from the RealSense",
++                               "start it first in another Terminal tab: sudo .venv/bin/python realsense_bridge.py")
++                              if idx == "realsense" else
++                              (f"{label} (camera {idx}) does not open",
++                               "allow camera access for Terminal; check with python cam_test.py"))
++            continue
+         cam.disconnect()
+         preview = HERE / f"outputs/do_task_{slot}.jpg"
+         preview.parent.mkdir(exist_ok=True)
+         cv2.imwrite(str(preview), cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2BGR))
+         ok(f"{label}: {setting} = camera {idx}, {got[0]}x{got[1]}, preview {preview.relative_to(HERE)}")
+         result[slot] = (idx, *got)
+-    if len(result) == 2 and result["cam0"][0] == result["cam1"][0]:
+-        fail("top and side camera are the same camera", "set FRONT_CAM and SIDE_CAM to different cameras")
++        CAMERA_NAMES[slot] = setting
++    if "cam0" not in result and "cam1" in result:  # one camera is enough: the side camera becomes the model's cam0
++        print(f"  --    {problems['cam0'][0]}: using the side camera as the only camera")
++        result = {"cam0": result["cam1"]}
++        CAMERA_NAMES["cam0"] = CAMERA_NAMES.pop("cam1")
++    elif "cam0" not in result:
++        fail(*problems["cam0"])
++    elif "cam1" in problems and S.get("SIDE_CAM", "").strip():
++        print(f"  --    {problems['cam1'][0]} (optional, continuing with the top camera only)")
++    elif "cam1" not in result:
++        print("  --    no side camera set (optional; cam1 gets a copy of cam0)")
+     return result
+ 
+ 
++CAMERA_NAMES: dict[str, str] = {}  # slot -> the settings.env name (iphone, webcam), shown on the live view
++
++
+ # ---------------------------------------------------------------- the run
+ 
+ def shrink_images(robot) -> None:
+@@ -402,7 +423,7 @@
+     return sup.outcome or "time"
+ 
+ 
+-def run(task: str, seconds: float, cams: dict, fake: bool, drop_name: str | None) -> None:
++def run(task: str, seconds: float, cams: dict, fake: bool, drop_name: str | None) -> str:
+     from lerobot.async_inference import robot_client as rc
+     from lerobot.async_inference.configs import RobotClientConfig
+     from lerobot.robots.so_follower import SO101FollowerConfig
+@@ -422,6 +443,7 @@
+     else:
+         config._retry_torque_writes()
+         robot = config._sync_calibration_on_connect(rc.make_robot_from_config(robot_cfg))
++    live_view.install(robot)  # before shrink_images: the dashboard gets the full camera pictures
+     shrink_images(robot)
+     robot.connect()
+     robot.connect = lambda calibrate=True: None  # the model client "connects" it again on every try
+@@ -429,6 +451,7 @@
+     # Ending a try closes the connection to the model server on purpose; LeRobot reports that as an error.
+     rc.RobotClient.logger.addFilter(lambda r: "Channel closed" not in r.getMessage())
+     sup = assist.Supervisor(robot)
++    live_view.watch(sup)
+ 
+     print("\n4. Settings for this run")
+     if not fake:
+@@ -488,6 +511,7 @@
+         print(f"\n   RESULT: {result} ({time.time() - t0:.0f} s, {attempt} {'try' if attempt == 1 else 'tries'})")
+         shown = log.relative_to(HERE) if log.is_relative_to(HERE) else log
+         print(f"   run log: {shown} (log.csv, events.txt, camera pictures)", flush=True)
++    return result or "stopped"
+ 
+ 
+ def go_home(robot, fake: bool, sup=None) -> None:
+@@ -544,6 +568,7 @@
+     else:
+         task = " ".join(args.task) or S.get("MOLMO_TASK") or "pick up the pawn and drop it into the cup"
+     drop_name = args.drop or (target.split()[-1] if target else None)
++    todo = split_tasks(task) or [task]
+     if not shutil.which("nc"):
+         fail("the 'nc' tool is missing", "tell Claude")
+ 
+@@ -556,9 +581,35 @@
+         cams = check_cameras()
+     if args.check:
+         print("\nAll checks passed. Ready to run.")
++        for i, t in enumerate(todo, 1):
++            print(f"   task {i}/{len(todo)}: \"{t}\"")
+         return
+-    run(task, args.seconds, cams, args.fake, drop_name)
++    if args.fake:
++        CAMERA_NAMES.update({slot: "fake camera" for slot in cams})
++    if len(todo) == 1:
++        live_view.set_label("MolmoAct2", CAMERA_NAMES)
++        live_view.final(f"done: {run(todo[0], args.seconds, cams, args.fake, drop_name)}")
++        return
++    print(f"\n{len(todo)} objects, one after another:", *(f"\n   {i}. {t}" for i, t in enumerate(todo, 1)), flush=True)
++    results = []
++    for i, t in enumerate(todo, 1):
++        what = object_name(t)
++        print(f"\n========== object {i}/{len(todo)}: {what} ==========", flush=True)
++        live_view.set_label(f"{what} ({i}/{len(todo)})", CAMERA_NAMES)
++        results.append((what, run(t, args.seconds, cams, args.fake, drop_name)))
++        if results[-1][1].startswith("stopped"):  # Ctrl+C / STOP / a guard: don't start the next object
++            break
++    done = sum(r.startswith("success") for _, r in results)
++    summary = "; ".join(f"{w}: {r}" for w, r in results)
++    head = "success" if done == len(todo) else f"{done}/{len(todo)} done"
++    print(f"\n   RESULT: {head}: {done}/{len(todo)} objects ({summary})", flush=True)
++    live_view.final(f"{head}: {done}/{len(todo)} objects")
+ 
+ 
++def object_name(task: str) -> str:
++    """'move the arm towards the duck, grasp it, ...' -> 'duck'"""
++    return task.split("towards the ", 1)[-1].split(",", 1)[0] if "towards the " in task else task
++
++
+ if __name__ == "__main__":
+     main()

@@ -102,14 +102,15 @@ description = "Simulation only: puts a new pen on the table at a random spot."
 sim_motion = "reset"
 
 # MolmoAct2 (zero-shot vision-language-action model on a Lightning AI GPU, Arman's Mac). The agent runs
-# <molmo dir>/do_task.py "<task>": it checks the Studio, robot and cameras, lets the model drive at 30 Hz, and
-# brings the arm home (also on STOP). Announced only on a laptop whose config.local.toml sets [molmo] dir.
-# The description tells the router to write the task in the wording MolmoAct2 was trained on.
+# <molmo dir>/do_task.py "<task>": it checks the Studio, robot and cameras, splits the task into one model
+# sentence per object ("the duck and the queen into the cup" -> 2 runs), lets the model drive at 30 Hz, carries
+# each held object to the taught drop pose, and brings the arm home (also on STOP). Both cameras stream to the
+# Live panel. Announced only on a laptop whose config.local.toml sets [molmo] dir.
 [skills.molmo_pick]
-description = "Picks up the object the user names and drops it into the container the user names (for example the white pawn into the cup). Write its instruction exactly as: move the arm towards the <object>, grasp it, lift it up, and drop it into the <container>"
+description = "Picks up the objects the user names, one after another, and drops each one into the container the user names (for example: the rubber duck and the chess queen into the cup). Its instruction must name every object and the container, e.g. 'Put the duck and the chess queen into the cup'."
 molmo = true
 instruction = true
-duration_s = 60                       # model driving time (--seconds); checks + a cold model load (~100 s) come first
+duration_s = 60                       # model driving time PER OBJECT (--seconds); checks + a cold model load (~100 s) come first
 
 [molmo]
 dir = ""                              # set in config.local.toml, e.g. "~/Documents/workplace/so101-hackathon"

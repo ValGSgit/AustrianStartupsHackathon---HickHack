@@ -53,6 +53,34 @@ FRAME_HZ = 8  # live stream rate to the dashboard (each frame ~25 KB)
 PREVIEW_HZ = 5  # idle camera / arm preview rate
 
 
+def camera_index(cam: dict) -> int:
+    """[cameras.front] name = "iphone" (or a list, first found wins: ["iphone", "webcam"]) finds the camera by its
+    macOS name, because macOS renumbers cameras whenever the iPhone comes or goes. Without a name (or without
+    ffmpeg, or on Windows): index."""
+    names = cam.get("name") or []
+    names = [names] if isinstance(names, str) else names
+    if not names or sys.platform != "darwin":
+        return int(cam.get("index", 0))
+    import re
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg") or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
+                                             if Path(p).exists()), None)
+    if not ffmpeg:
+        return int(cam.get("index", 0))
+    out = subprocess.run([ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                         capture_output=True, text=True, timeout=20).stderr
+    video = out.split("video devices:")[-1].split("audio devices:")[0]
+    found: dict[str, int] = {}
+    for idx, name in re.findall(r"\[(\d+)\] (.+)", video):  # same order as OpenCV's indexes
+        n = name.lower()
+        if "capture screen" in n or "desk view" in n:
+            continue
+        kind = "iphone" if "iphone" in n else "realsense" if "realsense" in n else "webcam"
+        found.setdefault(kind, int(idx))
+    return next((found[n] for n in names if n in found), int(cam.get("index", 0)))
+
+
 def skill_info(name: str, s: dict) -> dict:
     # instruction = true: the router writes the task text for the policy (SmolVLA follows it, ACT ignores it)
     return {"name": name, "description": s["description"], "instruction": bool(s.get("instruction"))}
@@ -139,7 +167,7 @@ class Backend:
                     self.send({"type": "status", "state": "running", "detail": f"running {msg['skill']}"})
                     ok, detail = self.run(msg["skill"], str(msg.get("task") or ""))
                     self.busy = False
-                    self.send({"type": "done", "skill": msg["skill"], "ok": ok, "detail": detail, "jpeg": self.snapshot()})
+                    self.send({"type": "done", "skill": msg["skill"], "ok": ok, "detail": detail, "jpeg": self.after_snapshot()})
             except Exception as e:  # report instead of dying - the stage demo must keep going
                 self.busy = False
                 if msg["type"] == "hw":
@@ -156,6 +184,7 @@ class Backend:
     def setup(self) -> None: ...
     def snapshot(self) -> str | None: ...
     def busy_snapshot(self) -> str | None: return None
+    def after_snapshot(self) -> str | None: return self.snapshot()
     def run(self, skill: str, task: str = "") -> tuple[bool, str]: ...
     def on_stop(self) -> None: ...
     def hw(self, action: str) -> None: ...
@@ -211,13 +240,14 @@ class RealBackend(Backend):
     def __init__(self, send):
         self.proc: subprocess.Popen | None = None
         self.proc_is_molmo = False
-        self.cam =next(iter(CONFIG.get("cameras", {}).values()), {"index": 0, "width": 640, "height": 480})
+        self.cam = next(iter(CONFIG.get("cameras", {}).values()), {"index": 0, "width": 640, "height": 480})
         self.reader: CameraReader | None = None
         self.bus = None  # lerobot FeetechMotorsBus while the arm is connected
         self.calibrated = False
         self.arm_error = ""
         self.camera_error = ""
         self.live_jpeg: str | None = None
+        self.reader_index = self.cam.get("index", 0)
         super().__init__(send)
 
     def skills(self):
@@ -230,12 +260,12 @@ class RealBackend(Backend):
         if action == "camera_on" and not self.reader:
             self.camera_error = ""
             try:
-                self.reader = CameraReader(self.cam)
+                self.reader = CameraReader(self._cam())
             except RuntimeError as e:
                 self.camera_error = str(e)
                 raise
             self.camera_on, self.camera_since = True, time.perf_counter()
-            self.log(f"camera {self.cam['index']} on")
+            self.log(f"camera {self.reader_index} on")
         elif action == "camera_off":
             if self.reader:
                 self.reader.close()
@@ -282,7 +312,7 @@ class RealBackend(Backend):
                    "detail": f"{f['port']} · " + ("calibrated · read-only" if self.calibrated else "not calibrated")}
         else:
             arm = {"state": "error" if self.arm_error else "off", "detail": self.arm_error or f"{f['port']} · not connected"}
-        c = self.cam
+        c = {**self.cam, "index": self.reader_index if self.reader else self.cam.get("name") or self.cam.get("index", 0)}
         if self.reader:
             cam = {"state": "on", "detail": f"index {c['index']} · {c['width']}x{c['height']}"}
         else:
@@ -300,7 +330,7 @@ class RealBackend(Backend):
         if self.reader and self.reader.frame is not None:
             return self._checked(self.reader.rgb())
         # camera not switched on: open it just for this frame (only while no skill runs - lerobot holds it then)
-        cap = cv2.VideoCapture(self.cam["index"], cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
+        cap = cv2.VideoCapture(self._cam()["index"], cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam["width"])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam["height"])
         # The first frames are dark while auto-exposure settles (measured: 5th frame at half the brightness, the
@@ -320,12 +350,20 @@ class RealBackend(Backend):
     def _checked(self, rgb: np.ndarray) -> str | None:
         """No frame is better than a blank one: the vision model happily 'sees' things in a black image."""
         if float(rgb.std()) < 6:
-            self.log(f"camera {self.cam['index']} gives a blank image (lens covered, or wrong index in config) - not sent")
+            self.log(f"camera {self.reader_index} gives a blank image (lens covered, or wrong index in config) - not sent")
             return None
         return jpeg_b64(rgb)
 
     def busy_snapshot(self):
         return self.live_jpeg
+
+    def after_snapshot(self):
+        # the camera is free again; if it gives nothing, the last live frame from the run is better than no picture
+        return self.snapshot() or self.live_jpeg
+
+    def _cam(self) -> dict:
+        self.reader_index = camera_index(self.cam)
+        return {**self.cam, "index": self.reader_index}
 
     def run(self, skill, task=""):
         s = SKILLS[skill]

@@ -1,0 +1,25 @@
+# Arman's Mac: the MolmoAct2 laptop (gitignored). Overrides config.toml.
+
+[molmo]
+dir = "~/Documents/workplace/so101-hackathon"
+
+# ACT / replay skills live on the team laptop, not here
+[skills.pick_pen]
+enabled = false
+
+[skills.wave]
+enabled = false
+
+[follower]
+port = "/dev/tty.usbmodem5A680122691"
+
+[leader]
+port = "/dev/tty.usbmodem5AE60587711"
+
+# Camera for the router's snapshot (scene before, "did it work?" after): found by its macOS name, because the
+# iPhone's index changes when cameras come and go. iPhone first (the model's main view), else the Mac camera.
+[cameras.front]
+name = ["iphone", "webcam"]
+index = 0
+width = 640
+height = 360
