@@ -229,7 +229,7 @@ def save_samples(samples: list[dict]) -> None:
     SAMPLES_FILE.write_text(json.dumps(samples, indent=1), encoding="utf-8")
 
 
-def see_one_cup(a, setup, typed: queue.Queue):
+def see_one_cup(a, setup, typed: queue.Queue, once: bool = False):
     """Camera (or --image) until exactly one cup is seen. Returns (uv, frame_size) or None (q)."""
     import vision as V
     while True:
@@ -246,6 +246,8 @@ def see_one_cup(a, setup, typed: queue.Queue):
         cups = V.find_cups(frame, setup)
         if len(cups) == 1:
             break
+        if once:
+            return None
         print(f"\nThe camera sees {len(cups)} cups" + "".join(
             f"\n  cup at ({c['uv'][0]:.0f}, {c['uv'][1]:.0f}), {c['px']} px" for c in cups))
         print("Put exactly ONE cup on the table (nothing else cup-coloured in view), then Enter = look again. (q = quit)")
@@ -310,9 +312,13 @@ def cmd_sample(a):
                 # look again: the cup now stands exactly where the taught grip pose puts it, which is the position
                 # these poses belong to (the cup can be bumped or slide while teaching)
                 A.go_to(arm, ready, 2.5)
-                again = see_one_cup(a, setup, typed)
-                if again is not None:
-                    shift = ((again[0][0] - uv[0]) ** 2 + (again[0][1] - uv[1]) ** 2) ** 0.5
+                again = see_one_cup(a, setup, typed, once=True)
+                shift = ((again[0][0] - uv[0]) ** 2 + (again[0][1] - uv[1]) ** 2) ** 0.5 if again else 0.0
+                if again is None or shift > 150:
+                    # cup dropped / knocked away (or a hand in view): don't guess, keep where it was seen first
+                    print("WARNING: did not see the put-down cup clearly - keeping the first position. If the cup "
+                          "fell during teaching, drop this sample (teach.py samples --drop N) and redo it.")
+                else:
                     print(f"cup put down at u={again[0][0]:.0f}, v={again[0][1]:.0f} ({shift:.0f} px from the start)")
                     uv, size = again
                 samples = load_samples() + [{"uv": list(uv), "frame_size": size, "poses": got}]
