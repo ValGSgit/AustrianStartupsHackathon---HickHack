@@ -1,5 +1,7 @@
 """Synthetic-frame tests for vision.py. Run: .venv\\Scripts\\python shellgame\\test_vision.py"""
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -27,7 +29,28 @@ def make_setup(cup_col=BLUE) -> dict:
     ref = scene({1: (0, 0)}, ball=(320, 120), cup_col=cup_col)
     return {"slots": [[x, y, R] for x, y in SLOTS], "cup_hsv": list(sample_hsv(ref, *SLOTS[0])),
             "ball_hsv": list(sample_hsv(ref, 320, 120)), "min_cup_px": 400, "min_ball_px": 80,
-            "max_offset_frac": 0.5, "frame_size": [640, 480]}
+            "max_offset_frac": 0.5, "frame_size": [640, 480], "use_background": False}
+
+
+def test_background(tmp=Path(__file__).resolve().parent / "_bg_test.jpg"):
+    """White cups on a dark board, one at the board edge: found by comparing with the empty-board photo."""
+    import vision
+    board = np.full((480, 640, 3), 235, np.uint8)               # white table
+    cv2.rectangle(board, (100, 40), (560, 470), (30, 30, 30), -1)  # dark board
+    cv2.imwrite(str(tmp), board)
+    old, vision.BG_FILE = vision.BG_FILE, tmp
+    try:
+        img = board.copy()
+        cv2.circle(img, (300, 45), 35, (225, 225, 225), -1)   # cup on the board edge
+        cv2.circle(img, (420, 300), 35, (225, 225, 225), -1)
+        img = cv2.add(img, 12)                                # auto exposure got a bit brighter
+        setup = {"slots": [], "cup_hsv": [[0, 0, 120], [179, 60, 255]], "min_cup_px": 1500, "max_cup_px": 15000,
+                 "frame_size": [640, 480]}
+        cups = find_cups(img, setup)
+        assert len(cups) == 2, cups
+    finally:
+        vision.BG_FILE = old
+        tmp.unlink(missing_ok=True)
 
 
 def occ(states):
