@@ -1,0 +1,9 @@
+.venv/
+.git/
+data/
+outputs/
+wandb/
+sim/model/
+**/__pycache__/
+*.log
+*.mp4

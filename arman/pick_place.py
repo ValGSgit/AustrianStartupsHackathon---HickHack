@@ -14,6 +14,7 @@ Teach these with `python poses.py teach`:
     safe        (optional) a high pose between the spots and the cup. If taught, every
                 transfer passes through it, which avoids knocking over the cup or other pieces.
 
+`pick_place(robot, poses, spot)` is the function the LLM will call later.
 """
 
 import sys

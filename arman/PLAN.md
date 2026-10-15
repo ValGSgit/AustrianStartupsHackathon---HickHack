@@ -18,6 +18,7 @@ There is no model on Hugging Face that does this task on *your* table out of the
 | ACT image weights (ResNet-18) + HF example SO-101 dataset (86 MB) | ✅ downloaded |
 | Training pipeline | ✅ tested: ACT 52M params trains, ~1.25 steps/s on the M2 (too slow for a full run, use cloud) |
 | Running a model on the Mac | ✅ tested: 60 ms per plan of 100 moves (~3 s of motion). Easy. |
+| Small LLM for later: Qwen3 4B via Ollama | ✅ downloaded (~2.5 GB) |
 | Poses code + multi-spot pick and place | ✅ tested with a fake robot |
 | `check.py` hardware check | ✅ ready, needs the robot plugged in |
 | HF username in `settings.env` | ✅ `armannnnnnn` |
@@ -52,11 +53,22 @@ There is no model on Hugging Face that does this task on *your* table out of the
 
 ### Phase 4: train in the cloud (~1 to 3 h, the Mac stays cool)
 - `scripts/train_act.sh cloud` (HF Jobs: your account has no credit yet, add some at huggingface.co/settings/billing) or Colab (free).
-- While it trains: practise the pitch.
+- While it trains: build the LLM layer (phase 6) and practise the pitch.
 
 ### Phase 5: test the learned model
 - `scripts/run_policy.sh 30`. Count successes out of 20 attempts. That number goes on the slide.
 
+### Phase 6: LLM layer (add when phases 2 to 5 work)
+You say: *"pick up the chess pieces and put them in the cup"*. The small LLM (Qwen3 4B, local, no internet) calls functions one by one:
+
+| Tool | What it does | Built from |
+|---|---|---|
+| `look()` | Which spots have a piece | Camera + color check per taped spot (OpenCV) |
+| `pick_place(spot)` | Puts the piece on that spot in the cup | `pick_place.py` (or ACT later) |
+| `go_home()` | Rests the arm | `poses.go_to(home)` |
+| `say(text)` | Speaks (macOS `say`) | 1 line |
+
+Loop: look, pick one, look again, until the table is empty, then say "done". A language twist makes the LLM worth it: *"leave the white pieces"*, *"only the ones on the left"*.
 
 ## Bring to the hackathon
 - Masking tape + marker (spots), 6+ chess pieces (tall ones grip best), a **wide** cup (easy drop)
@@ -67,7 +79,7 @@ There is no model on Hugging Face that does this task on *your* table out of the
 | Risk | Fallback |
 |---|---|
 | Learned model is unreliable | Demo with poses mode, show ACT as "work in progress" with honest numbers |
-| Cloud training slow or fails | Train a shorter run (10k steps) or show poses mode |
+| Cloud training slow or fails | Train a shorter run (10k steps) or show poses mode + LLM |
 | Gripper drops pieces | Re-teach `grasp_N` with more squeeze; tall pieces; tips |
 | Camera moved | Re-tape the camera; never touch it after recording |
 | macOS blocks the camera | System Settings > Privacy > Camera: allow your terminal app |

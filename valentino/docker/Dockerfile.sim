@@ -1,0 +1,48 @@
+# ROS 2 Jazzy + MuJoCo SO-101 simulation + LeRobot 0.6.1 (CPU).
+# Ubuntu 24.04 ships Python 3.12, which is what LeRobot 0.6 requires.
+#
+#   docker compose build sim
+#   docker compose run --rm --service-ports sim                       (scripted demo + Foxglove on :8765)
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    MUJOCO_GL=osmesa \
+    PYOPENGL_PLATFORM=osmesa
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-venv python3-pip \
+        ros-jazzy-foxglove-bridge \
+        libosmesa6 libgl1 libglib2.0-0 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# venv that still sees the ROS Python packages (rclpy, message types).
+RUN python3 -m venv --system-site-packages /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    VIRTUAL_ENV=/opt/venv
+
+# CPU torch keeps the image small and works on any machine; ACT inference in sim is fine on CPU.
+# Train on the host GPU (robot.py train) - the dataset folder is shared through the volume.
+# Pinned to the host's versions; lerobot 0.6.1 needs torch<2.12 (an unpinned install pulls CUDA torch).
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchvision==0.26.0 \
+    && pip install "lerobot[dataset,training]==0.6.1" "mujoco==3.3.7" "opencv-python-headless" "PyOpenGL==3.1.10"
+
+WORKDIR /ws
+COPY sim/ /ws/sim/
+# Low-poly meshes: CPU (software) rendering of the full 380k-triangle model takes ~270 ms per frame,
+# the decimated one ~100 ms. Physics is unchanged (collisions use convex hulls).
+RUN pip install "trimesh==4.8.3" "fast-simplification==0.1.11" && python sim/fetch_model.py --lowpoly
+ENV PYTHONPATH=/ws/sim     SO101_SIM_LOWPOLY=1
+
+COPY ros2_ws/src/ /ws/ros2_ws/src/
+# colcon (from apt) runs under /usr/bin/python3 and writes that into the node launchers, but
+# mujoco/lerobot live in the venv - so point the launchers at the venv's python, and fail the build if not.
+RUN . /opt/ros/jazzy/setup.sh && cd /ws/ros2_ws && colcon build --symlink-install \
+    && sed -i '1s|^#!.*python3.*$|#!/opt/venv/bin/python|' install/so101_sim_ros/lib/so101_sim_ros/* \
+    && head -1 install/so101_sim_ros/lib/so101_sim_ros/sim_node | grep -q /opt/venv/bin/python
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["ros2", "launch", "so101_sim_ros", "sim.launch.py", "mode:=scripted"]

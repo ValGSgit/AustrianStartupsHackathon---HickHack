@@ -1,0 +1,3 @@
+Track 1 · Robotics
+Hack the Robot
+You have 24 hours to teach our robot something it couldn’t do before. You’ll get full access to the hardware, sensors and software stack. It’s up to you whether you give it new skills, add computer vision, or make it do something completely unexpected. In the end, what counts is what the robot shows live on stage.

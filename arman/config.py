@@ -3,6 +3,7 @@
 Set FAKE_ROBOT=1 to test scripts without hardware (prints moves instead of sending them).
 """
 
+import functools
 import json
 import logging
 import os
@@ -75,11 +76,25 @@ def to_robot(robot, action: dict) -> dict:
 
 
 class FakeRobot:
-    """Stands in for the arm: remembers the last command and reports it as its position."""
+    """Stands in for the arm: remembers the last command and reports it as its position.
+    With cameras=True it also returns a grey 'front' image of the configured size."""
 
-    def __init__(self):
+    name = "so_follower"
+
+    def __init__(self, cameras: bool = False):
         self.state = {f"{j}.pos": 0.0 for j in JOINTS}
         self.commands = 0
+        self.cameras = {"front": None} if cameras else {}
+        self.calibration = {}
+        self.shape = (int(S.get("FRONT_HEIGHT") or 480), int(S.get("FRONT_WIDTH") or 640), 3)
+
+    @property
+    def action_features(self):
+        return {f"{j}.pos": float for j in JOINTS}
+
+    @property
+    def observation_features(self):
+        return {**self.action_features, **({"front": self.shape} if self.cameras else {})}
 
     def connect(self, calibrate: bool = True):
         print("[fake] robot connected")
@@ -88,7 +103,12 @@ class FakeRobot:
         print(f"[fake] robot disconnected after {self.commands} commands")
 
     def get_observation(self):
-        return dict(self.state)
+        obs = dict(self.state)
+        if self.cameras:
+            import numpy as np
+
+            obs["front"] = np.full(self.shape, 128, dtype=np.uint8)
+        return obs
 
     def send_action(self, action):
         self.state.update(action)
@@ -132,25 +152,180 @@ def _sync_calibration_on_connect(dev):
     return dev
 
 
-def make_robot():
+def _cameras_by_name() -> dict[str, int]:
+    """Camera numbers by their macOS names (ffmpeg lists them in the same order OpenCV numbers them).
+    More reliable than the picture shape: the iPhone over a cable switches between 4:3 and 16:9."""
+    import re
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if Path("/opt/homebrew/bin/ffmpeg").exists() else None)
+    if not ffmpeg:
+        return {}
+    out = subprocess.run([ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                         capture_output=True, text=True, timeout=20).stderr
+    found = {}
+    video = out.split("video devices:")[-1].split("audio devices:")[0]
+    for idx, name in re.findall(r"\[(\d+)\] (.+)", video):
+        n = name.lower()
+        if "capture screen" in n or "desk view" in n:
+            continue
+        if "iphone" in n:
+            found.setdefault("iphone", int(idx))
+        elif "realsense" in n:
+            found.setdefault("infrared", int(idx))
+        else:
+            found.setdefault("webcam", int(idx))
+    return found
+
+
+@functools.lru_cache(maxsize=1)
+def identify_cameras() -> dict[str, int]:
+    """Find the cameras, because macOS renumbers them whenever one comes or goes. First by their macOS names;
+    if that is not possible, by what they deliver: iPhone = widescreen 16:9, MacBook webcam = 4:3 in colour,
+    RealSense = grey infrared."""
+    try:
+        by_name = _cameras_by_name()
+        if by_name:
+            return by_name
+    except Exception:  # noqa: BLE001
+        pass
+    import cv2
+    import numpy as np
+
+    found = {}
+    for idx in range(5):
+        cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION)
+        if not cap.isOpened():
+            continue
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        frame, t0 = None, __import__("time").time()
+        while __import__("time").time() - t0 < 4:  # the iPhone over Wi-Fi needs a few seconds to deliver
+            got, f = cap.read()
+            if got:
+                frame = f
+                if __import__("time").time() - t0 > 1:  # let auto-exposure settle a moment
+                    break
+        cap.release()
+        if frame is None:
+            continue
+        h, w = frame.shape[:2]
+        colour = float(np.abs(frame[..., 0].astype(int) - frame[..., 2].astype(int)).mean())
+        if abs(w / h - 16 / 9) < 0.05:
+            found.setdefault("iphone", idx)
+        elif colour > 3:
+            found.setdefault("webcam", idx)
+        else:
+            found.setdefault("infrared", idx)
+    return found
+
+
+def camera_index(prefix: str) -> int | str | None:
+    """FRONT_CAM / SIDE_CAM / WRIST_CAM from settings.env as a camera number. Accepts a number or a name
+    ('iphone', 'webcam') that is looked up by what the camera delivers. None if not set or not found.
+    'realsense' stays 'realsense': its colour image comes from realsense_bridge.py, see camera_config()."""
+    value = S.get(f"{prefix}_CAM", "").strip().lower()
+    if value.isdigit():
+        return int(value)
+    if value == "realsense":
+        return value
+    return identify_cameras().get(value) if value else None
+
+
+REALSENSE_PORT = 5555
+
+
+def _tolerant_camera_sizes() -> None:
+    """The iPhone (and some webcams) switch picture size by themselves, e.g. 640x480 -> 1920x1080. LeRobot then
+    stops with "frame width ... do not match". Resize such frames to the configured size instead."""
+    from lerobot.cameras.opencv import camera_opencv
+
+    cls = camera_opencv.OpenCVCamera
+    if getattr(cls, "_tolerant", False):
+        return
+    original = cls._postprocess_image
+
+    def postprocess(self, image):
+        import cv2
+
+        if image is not None and image.ndim == 3 and (image.shape[0], image.shape[1]) != (self.capture_height, self.capture_width):
+            image = cv2.resize(image, (self.capture_width, self.capture_height), interpolation=cv2.INTER_AREA)
+        return original(self, image)
+
+    cls._postprocess_image = postprocess
+    cls._tolerant = True
+
+
+def camera_config(index: int | str, width: int, height: int):
+    """LeRobot camera settings for a camera number, or for 'realsense' (the D435i's colour camera, passed on
+    by realsense_bridge.py, which runs with sudo because macOS gives normal apps only its infrared image)."""
+    _tolerant_camera_sizes()
+    if index == "realsense":
+        from lerobot.cameras.zmq import ZMQCameraConfig
+
+        return ZMQCameraConfig(server_address="127.0.0.1", port=REALSENSE_PORT, camera_name="realsense",
+                               width=640, height=480, fps=30, timeout_ms=3000)
+    from lerobot.cameras.opencv import OpenCVCameraConfig
+
+    return OpenCVCameraConfig(index_or_path=index, width=width, height=height, fps=30)
+
+
+def make_robot(cameras: bool = False):
+    """cameras=False (default) for poses and driving: faster to connect. cameras=True for recording and
+    running a trained model; uses FRONT_CAM, SIDE_CAM and WRIST_CAM (if set) from settings.env. Camera access only
+    works when the script runs in the Terminal app (macOS camera permission)."""
     if FAKE:
-        return FakeRobot()
+        return FakeRobot(cameras)
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
     _retry_torque_writes()
-
-    # No cameras here: poses only need the joints, and skipping cameras makes connecting faster.
+    cams = {}
+    if cameras:
+        cams["front"] = camera_config(camera_index("FRONT"), int(S.get("FRONT_WIDTH") or 640),
+                                      int(S.get("FRONT_HEIGHT") or 480))
+        if camera_index("SIDE") is not None:
+            cams["side"] = camera_config(camera_index("SIDE"), int(S.get("SIDE_WIDTH") or 640),
+                                         int(S.get("SIDE_HEIGHT") or 480))
+        if S.get("WRIST_CAM"):
+            cams["wrist"] = camera_config(camera_index("WRIST"), 640, 480)
     return _sync_calibration_on_connect(SO101Follower(
         SO101FollowerConfig(
             port=S["FOLLOWER_PORT"],
             id=S["FOLLOWER_ID"],
+            cameras=cams,
             # Safety: never jump more than 15 degrees in a single command.
             max_relative_target=15.0,
         )
     ))
 
 
+class FakeLeader:
+    """Stands in for the joystick: slowly swings the elbow so a fake recording has some motion."""
+
+    def __init__(self):
+        import time
+
+        self.t0 = time.time()
+
+    def connect(self, calibrate: bool = True):
+        print("[fake] joystick connected")
+
+    def disconnect(self):
+        print("[fake] joystick disconnected")
+
+    def get_action(self):
+        import math
+        import time
+
+        action = {f"{j}.pos": 0.0 for j in JOINTS}
+        action["elbow_flex.pos"] = 10 * math.sin(time.time() - self.t0)
+        return action
+
+
 def make_leader():
+    if FAKE:
+        return FakeLeader()
     from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
     _retry_torque_writes()

@@ -1,0 +1,18 @@
+{
+  "z": {
+    "shoulder_pan.pos": 0.7032967032967034,
+    "shoulder_lift.pos": -102.50549450549451,
+    "elbow_flex.pos": 96.7032967032967,
+    "wrist_flex.pos": 59.51648351648352,
+    "wrist_roll.pos": 6.549450549450549,
+    "gripper.pos": 1.2396694214876034
+  },
+  "home": {
+    "shoulder_pan.pos": -10.067032967032967,
+    "shoulder_lift.pos": -94.14285714285715,
+    "elbow_flex.pos": 97.04395604395606,
+    "wrist_flex.pos": 69.21868131868132,
+    "wrist_roll.pos": 28.230769230769226,
+    "gripper.pos": 2.1226415094339623
+  }
+}
