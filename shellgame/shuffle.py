@@ -170,8 +170,7 @@ def main() -> None:
                 print(f"move {k}: {src} -> {dst}", flush=True)
             M.go_ready(arm, poses)
         except KeyboardInterrupt:
-            print("
-stopped (Ctrl+C)")
+            print("stopped (Ctrl+C)")
         finally:
             A.release(arm)
         return
