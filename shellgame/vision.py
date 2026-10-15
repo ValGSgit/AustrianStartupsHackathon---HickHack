@@ -57,7 +57,34 @@ def is_white(setup: dict) -> bool:
     return lo[1] == 0 and hi[1] <= 110
 
 
+BG_FILE = HERE / "vision_bg.jpg"
+_bg_cache: dict = {}
+
+
+def background(shape) -> np.ndarray | None:
+    """Brightness of the EMPTY board (arm at ready), saved by `vision.py background`, or None."""
+    if not BG_FILE.exists():
+        return None
+    key = (BG_FILE.stat().st_mtime, shape)
+    if _bg_cache.get("key") != key:
+        img = cv2.imread(str(BG_FILE))
+        img = cv2.resize(img, (shape[1], shape[0])) if img.shape[:2] != shape[:2] else img
+        _bg_cache.update(key=key, v=cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2], (5, 5), 0))
+    return _bg_cache["v"]
+
+
 def cup_mask(frame: np.ndarray, setup: dict) -> np.ndarray:
+    """Cup pixels. With a background photo: everything clearly brighter than the empty board was (the board edge,
+    the table and the robot are in that photo, so they never count; cups at the board edge are still found).
+    Without one: white cups on the dark board by brightness, inside the board."""
+    bg = background(frame.shape) if setup.get("use_background", True) else None
+    if bg is not None:
+        v = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[:, :, 2], (5, 5), 0).astype(np.int16)
+        diff = v - bg.astype(np.int16)
+        diff -= int(np.median(diff))  # auto exposure shifts the whole picture: compare relative brightness
+        m = (diff > setup.get("bg_diff", 40)).astype(np.uint8) * 255
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     """Cup pixels. White cups on the dark board: everything clearly brighter than the board, inside the board.
     The threshold adapts to each frame (Otsu), so auto exposure and lamp changes don't break it."""
     if not is_white(setup):
@@ -185,7 +212,7 @@ def find_cups(frame: np.ndarray, setup: dict) -> list[dict]:
     cups = [{"uv": (float(cents[i][0]), float(cents[i][1])), "px": int(stats[i][4]),
              "bbox": tuple(int(x) for x in stats[i][:4])}
             for i in range(1, n) if setup.get("min_cup_px", 400) * area <= stats[i][4] <= setup.get("max_cup_px", 15000) * area]
-    hull = board_hull(frame) if setup.get("board_only", True) else None
+    hull = board_hull(frame) if setup.get("board_only", True) and background(frame.shape) is None else None
     if hull is not None:
         cups = [c for c in cups if cv2.pointPolygonTest(hull, c["uv"], False) >= 0]
     return sorted(cups, key=lambda c: -c["px"])
@@ -332,12 +359,20 @@ def cmd_cups(a):
     cv2.destroyAllWindows()
 
 
+def cmd_background(a):
+    """Save the empty board (no cups, arm at ready) as the reference: from then on, new bright things = cups."""
+    frame = cv2.imread(a.image) if a.image else grab_frame(a.camera)
+    cv2.imwrite(str(BG_FILE), frame)
+    print(f"saved {BG_FILE.name}. Redo this whenever the camera, board or lamp moves.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn, help_ in [("setup", cmd_setup, "click slots, radius, cup and ball colours"),
                             ("live", cmd_live, "annotated live view"), ("once", cmd_once, "one frame, print states"),
-                            ("cups", cmd_cups, "live detected cups with their u,v")]:
+                            ("cups", cmd_cups, "live detected cups with their u,v"),
+                            ("background", cmd_background, "photo of the EMPTY board = what is not a cup")]:
         s = sub.add_parser(name, help=help_)
         s.add_argument("--camera", type=int, help="override the [cameras.front] index from config")
         s.add_argument("--image", help="use a saved image instead of the camera")
