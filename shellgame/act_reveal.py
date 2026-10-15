@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE.parent / "syed"  # robot.py, stage.py, outputs/
 sys.path.insert(0, str(ROOT))
 import robot  # noqa: E402
 import stage  # noqa: E402

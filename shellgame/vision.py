@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE.parent / "syed"))  # robot.py, stage.py, selfcheck.py
 from selfcheck import cube_mask, grab_frame, open_camera  # noqa: E402  (camera: selfcheck.camera_cfg)
 from selfcheck import sample_hsv as _sample_colour  # noqa: E402
 

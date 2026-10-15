@@ -26,7 +26,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE.parent / "syed"))  # robot.py, stage.py, selfcheck.py
 import arm as A  # noqa: E402
 import stage  # noqa: E402
 from stage import AMBER, FG, GREEN, RED  # noqa: E402
